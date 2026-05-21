@@ -1,0 +1,32 @@
+# SwiftPM / Xcode build artefacts
+.build/
+.swiftpm/
+build/
+DerivedData/
+Packages/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Compiled bundles & installers
+*.app
+*.dmg
+*.pkg
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Codesigning artefacts that should stay local
+*.p12
+*.cer
+*.mobileprovision
+
+# Application data / models (would balloon the repo)
+~/Library/Application Support/VoiceVoice/
