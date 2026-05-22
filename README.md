@@ -1,8 +1,16 @@
 # VoiceVoice
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/sergekruff/voicevoice)](https://github.com/sergekruff/voicevoice/releases/latest)
+[![Platform: macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://www.apple.com/macos/)
+[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-orange?logo=apple)](#требования)
+[![Downloads](https://img.shields.io/github/downloads/sergekruff/voicevoice/total?label=downloads)](https://github.com/sergekruff/voicevoice/releases)
+
+🇬🇧 [Read in English](README.en.md)
+
 **Голосовая диктовка для macOS с локальным Whisper.** Зажал `Fn`, наговорил, отпустил — и текст появляется в любом активном поле ввода. Распознавание идёт целиком на твоей машине через Apple Neural Engine — ни одна фраза не уходит в облако.
 
-Лендинг: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) · Готовый `.dmg` для скачивания
+Лендинг: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) · Готовый `.dmg` — [последний релиз](https://github.com/sergekruff/voicevoice/releases/latest) или с лендинга.
 
 ## Возможности
 

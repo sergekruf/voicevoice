@@ -80,6 +80,11 @@ final class AppSettings: ObservableObject {
     /// If true (default off), appends a context-appropriate emoji to the recognized text
     /// when a known trigger phrase is present (хаха → 😄, спасибо → 🙏, поздравляю → 🎉…).
     @AppStorage("autoEmoji") var autoEmoji: Bool = false
+    /// Master switch — when true, ALL HUDs / toasts / overlays are suppressed:
+    /// recording mic, result HUD, learned-correction toast, ready toast, model-loading
+    /// indicator. Useful for screencasts, presentations, focused work. Overrides the
+    /// finer-grained `showResultHUD` toggle.
+    @AppStorage("quietMode") var quietMode: Bool = false
 
     var hotkey: HotkeyKind {
         HotkeyKind(rawValue: hotkeyRaw) ?? .fn

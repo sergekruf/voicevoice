@@ -1,0 +1,89 @@
+name: 🐞 Bug report
+description: Что-то работает не так, как описано в README.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Описание
+      description: Что произошло? Что ожидалось вместо этого?
+      placeholder: |
+        Например: «Зажимаю Fn в Bitrix24, говорю — текст не вставляется, в логах вижу `Watcher: cannot fetch focused element`.»
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      placeholder: |
+        1. Открываю Bitrix24
+        2. Ставлю курсор в поле сообщения
+        3. Зажимаю Fn, говорю «Привет», отпускаю
+        4. Текст не появляется
+      render: markdown
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: Версия macOS
+      placeholder: "14.5 Sonoma"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Чип
+      options:
+        - M1
+        - M1 Pro
+        - M1 Max
+        - M1 Ultra
+        - M2
+        - M2 Pro
+        - M2 Max
+        - M2 Ultra
+        - M3
+        - M3 Pro
+        - M3 Max
+        - M4
+        - M4 Pro
+        - M4 Max
+        - M5
+        - Intel (unsupported)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: voicevoice-version
+    attributes:
+      label: Версия VoiceVoice
+      description: "VoiceVoice → Меню-бар → О приложении (или см. About в окне настроек)."
+      placeholder: "1.0.0 (build N)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: model
+    attributes:
+      label: Модель Whisper
+      options:
+        - large-v3-turbo, 4-bit (default)
+        - large-v3-turbo (full)
+        - large-v3
+        - medium
+        - small
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Лог
+      description: Последние ~50 строк из `~/Library/Logs/VoiceVoice/voicevoice.log` сразу после воспроизведения. Команда — `tail -50 ~/Library/Logs/VoiceVoice/voicevoice.log`.
+      render: shell

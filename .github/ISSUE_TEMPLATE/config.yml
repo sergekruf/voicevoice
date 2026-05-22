@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📥 Скачать готовый .dmg
+    url: https://voicevoice.vectrolab.ru
+    about: Если просто нужно установить приложение, не открывайте issue — заберите .dmg на лендинге.
+  - name: 💬 Обсудить идею в Discussions
+    url: https://github.com/sergekruff/voicevoice/discussions
+    about: Для общих вопросов и идей. Issues — только для багов и сформулированных feature requests.

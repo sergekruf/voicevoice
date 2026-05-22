@@ -30,3 +30,9 @@ Packages/
 
 # Application data / models (would balloon the repo)
 ~/Library/Application Support/VoiceVoice/
+
+# Personal / internal notes — not for the public repo
+PROMOTION.md
+NOTES.md
+TODO.md
+

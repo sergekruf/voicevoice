@@ -17,6 +17,9 @@ final class HUDManager {
     private var readyPanel: NSPanel?
     private init() {}
 
+    /// True when the user has opted into Quiet Mode — suppresses all HUDs.
+    private var isQuiet: Bool { AppSettings.shared.quietMode }
+
     // MARK: - Recording overlay (bottom-center pulsing mic)
 
     func showRecording() { showRecordingOverlay() }
@@ -24,6 +27,8 @@ final class HUDManager {
     func hideRecording() { hideRecordingOverlay() }
 
     private func showRecordingOverlay() {
+        // The recording indicator (mic icon) is functional UI, not a notification —
+        // shown even in quiet mode so the user always knows when recording is active.
         if centerOverlayPanel == nil {
             let host = NSHostingController(rootView: RecordingOverlay())
             let panel = makePanel(size: NSSize(width: 120, height: 120), content: host.view)
@@ -42,6 +47,7 @@ final class HUDManager {
 
     func showResult(record: TranscriptionRecord) {
         hideRecording()
+        if isQuiet { return }
         guard AppSettings.shared.showResultHUD else { return }
         present(view: ResultHUD(record: record), ref: &resultPanel, size: NSSize(width: 520, height: 160), autohide: 7.0)
     }
@@ -51,6 +57,7 @@ final class HUDManager {
     // MARK: - Learned-correction toast
 
     func showLearned(corrections: [(wrong: String, right: String)]) {
+        if isQuiet { return }
         guard !corrections.isEmpty else { return }
         // Height grows with number of correction pairs shown (max 3 + "…and N more").
         let rowCount = min(corrections.count, 3) + (corrections.count > 3 ? 1 : 0)
@@ -61,6 +68,7 @@ final class HUDManager {
     // MARK: - Model loading
 
     func showLoadingIndicator() {
+        if isQuiet { return }
         present(view: LoadingIndicator(), ref: &loadingPanel, autohide: nil)
     }
 
@@ -71,6 +79,7 @@ final class HUDManager {
     // MARK: - Ready toast (after onboarding)
 
     func showReady() {
+        if isQuiet { return }
         present(view: ReadyToast(), ref: &readyPanel, autohide: 5.0)
     }
 

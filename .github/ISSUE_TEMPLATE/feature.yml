@@ -1,0 +1,34 @@
+name: 💡 Feature request
+description: Предложение по улучшению или новая фича.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему решает
+      description: Опишите ситуацию, в которой текущий VoiceVoice неудобен или не делает чего-то нужного.
+      placeholder: |
+        Например: «Хочу, чтобы при диктовке в Termius можно было использовать голосовую команду «выполнить» вместо ручной вставки.»
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Желаемое поведение
+      description: Что должно получиться, если фича будет реализована.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативы (опционально)
+      description: Какие способы вы рассматривали или используете сейчас?
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Дополнительный контекст
+      description: Скриншоты, ссылки на похожие фичи в других приложениях, любые детали.
