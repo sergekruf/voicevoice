@@ -1,10 +1,10 @@
 # VoiceVoice
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/sergekruff/voicevoice)](https://github.com/sergekruff/voicevoice/releases/latest)
+[![Release](https://img.shields.io/github/v/release/sergekruf/voicevoice)](https://github.com/sergekruf/voicevoice/releases/latest)
 [![Platform: macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://www.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-orange?logo=apple)](#requirements)
-[![Downloads](https://img.shields.io/github/downloads/sergekruff/voicevoice/total?label=downloads)](https://github.com/sergekruff/voicevoice/releases)
+[![Downloads](https://img.shields.io/github/downloads/sergekruf/voicevoice/total?label=downloads)](https://github.com/sergekruf/voicevoice/releases)
 
 🇷🇺 [Читать на русском](README.md)
 
@@ -38,12 +38,12 @@ Landing: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) · Pre-built
 
 ### Pre-built .dmg
 
-Easiest path — download from the landing: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) or [latest GitHub release](https://github.com/sergekruff/voicevoice/releases/latest).
+Easiest path — download from the landing: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) or [latest GitHub release](https://github.com/sergekruf/voicevoice/releases/latest).
 
 ### Build from source
 
 ```bash
-git clone https://github.com/sergekruff/voicevoice.git
+git clone https://github.com/sergekruf/voicevoice.git
 cd voicevoice
 ./setup-signing.sh    # one-time: creates a stable self-signed identity so TCC permissions persist across rebuilds
 ./build-app.sh        # builds the SwiftPM target → .app bundle → signs

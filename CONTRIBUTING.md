@@ -19,7 +19,7 @@
 ## Локальная разработка
 
 ```bash
-git clone https://github.com/sergekruff/voicevoice.git
+git clone https://github.com/sergekruf/voicevoice.git
 cd voicevoice
 ./setup-signing.sh    # одноразово
 ./build-app.sh        # сборка + ad-hoc подпись стабильной идентичностью

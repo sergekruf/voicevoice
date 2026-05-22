@@ -32,5 +32,5 @@
 - WhisperKit + CoreML/ANE
 - GRDB (SQLite-обёртка)
 
-[Unreleased]: https://github.com/sergekruff/voicevoice/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/sergekruff/voicevoice/releases/tag/v1.0.0
+[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.0
