@@ -8,6 +8,19 @@
 - Голосовые команды над буфером обмена (`⌥ Option` удержание → LLM-преобразование текста).
 - GitHub Actions для авто-сборки `.app` и `.dmg` по тегу `v*`.
 
+## [1.0.1] — 2026-05-22
+
+### Изменено
+- `CFBundleShortVersionString` обновлён до `1.0.1`, `CFBundleVersion` — до `2`. Функциональных изменений по сравнению с бинарником, прикреплённым к релизу v1.0.0 после публикации, нет — релиз нужен, чтобы тег корректно соответствовал содержимому DMG.
+
+### Добавлено к репо (после первичной публикации v1.0.0)
+- `README.en.md` — полный английский перевод README.
+- Бейджи в основном README: лицензия / версия / платформа / Apple Silicon / счётчик скачиваний.
+- `CHANGELOG.md` и `CONTRIBUTING.md`.
+- `.github/ISSUE_TEMPLATE/` — структурированные шаблоны bug-report и feature-request, плюс контакт-линки.
+- `assets/social-preview.png` — 1280×640 для GitHub Settings → Social preview.
+- 12 GitHub Topics для обнаруживаемости.
+
 ## [1.0.0] — 2026-05-22
 
 Первый публичный релиз.
@@ -32,5 +45,6 @@
 - WhisperKit + CoreML/ANE
 - GRDB (SQLite-обёртка)
 
-[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.1
 [1.0.0]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.0
