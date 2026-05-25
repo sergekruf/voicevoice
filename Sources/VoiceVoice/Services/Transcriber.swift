@@ -125,14 +125,24 @@ final class Transcriber: ObservableObject {
             language: settings.language,
             temperature: 0,
             temperatureFallbackCount: 3,
-            sampleLength: 224,
+            // 448 — это потолок Whisper по выходным токенам в одном 30-сек окне (448 - 4 prefix).
+            // На плотной русской речи 224 иногда упирается в лимит и обрезает хвост окна.
+            sampleLength: 448,
             usePrefillPrompt: true,
             usePrefillCache: true,
             skipSpecialTokens: true,
             withoutTimestamps: true,
             promptTokens: usePunctPrompt ? punctuationPromptTokens : nil,
             suppressBlank: false,
-            noSpeechThreshold: 0.95
+            noSpeechThreshold: 0.95,
+            // ВАЖНО для длинных диктовок (>30 с): без явного chunkingStrategy WhisperKit
+            // падает в встроенный seek-loop, который при провале одного 30-сек окна
+            // (temperature-fallback exhaustion / no-speech threshold) прыгает вперёд на
+            // полные 30 с — отсюда «дыры» в середине длинных распознаваний.
+            // VAD-чанкер режет аудио по тишине: каждый чанк декодируется независимо,
+            // провал одного не выбивает соседей, границы попадают на silence, а не
+            // на середину слова.
+            chunkingStrategy: .vad
         )
 
         let start = Date()

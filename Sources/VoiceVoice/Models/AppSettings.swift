@@ -86,6 +86,20 @@ final class AppSettings: ObservableObject {
     /// finer-grained `showResultHUD` toggle.
     @AppStorage("quietMode") var quietMode: Bool = false
 
+    // ── Lifetime stats (incremented on every dictation, never trimmed). ─────────
+    // The history table itself is capped at 200 rows, so HistoryStore.stats()
+    // only sees the last 200 records — these counters give the Dashboard true
+    // lifetime numbers. Seeded once on first launch after upgrade from the in-DB
+    // counts (see AppController.migrateLifetimeStatsIfNeeded).
+    @AppStorage("lifetimeRecordsCount")    var lifetimeRecordsCount: Int = 0
+    @AppStorage("lifetimeCharactersCount") var lifetimeCharactersCount: Int = 0
+    @AppStorage("lifetimeAudioSeconds")    var lifetimeAudioSeconds: Double = 0
+    @AppStorage("lifetimeProcessingMs")    var lifetimeProcessingMs: Int = 0
+    /// Unix timestamp of the very first ever transcription. 0 = none yet.
+    @AppStorage("firstRecordAt")           var firstRecordAt: Double = 0
+    /// Set to true after the one-time backfill from HistoryStore.stats() runs.
+    @AppStorage("lifetimeStatsMigrated")   var lifetimeStatsMigrated: Bool = false
+
     var hotkey: HotkeyKind {
         HotkeyKind(rawValue: hotkeyRaw) ?? .fn
     }

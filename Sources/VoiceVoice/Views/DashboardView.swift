@@ -17,6 +17,15 @@ struct DashboardView: View {
         return Int((Double(settings.fuzzySubstitutions) / Double(settings.totalSubstitutions) * 100).rounded())
     }
 
+    /// Average realtime factor (audio_seconds / processing_seconds) over all-time.
+    private var lifetimeRTF: Double {
+        guard settings.lifetimeProcessingMs > 0 else { return 0 }
+        return settings.lifetimeAudioSeconds / (Double(settings.lifetimeProcessingMs) / 1000)
+    }
+    private var firstRecordDate: Date? {
+        settings.firstRecordAt > 0 ? Date(timeIntervalSince1970: settings.firstRecordAt) : nil
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -26,14 +35,14 @@ struct DashboardView: View {
                 Group {
                     sectionTitle("Распознавание")
                     HStack(spacing: 12) {
-                        StatCard(title: "Всего расшифровок", value: "\(histStats.totalRecords)", icon: "waveform.path")
-                        StatCard(title: "Распознано символов", value: numberCompact(histStats.totalCharacters), icon: "text.alignleft")
-                        StatCard(title: "Записано аудио", value: duration(histStats.totalSeconds), icon: "clock")
+                        StatCard(title: "Всего расшифровок", value: "\(settings.lifetimeRecordsCount)", icon: "waveform.path")
+                        StatCard(title: "Распознано символов", value: numberCompact(settings.lifetimeCharactersCount), icon: "text.alignleft")
+                        StatCard(title: "Записано аудио", value: duration(settings.lifetimeAudioSeconds), icon: "clock")
                     }
                     HStack(spacing: 12) {
-                        StatCard(title: "Сред. RTF", value: histStats.averageRTF > 0 ? String(format: "%.1f×", histStats.averageRTF) : "—",
+                        StatCard(title: "Сред. RTF", value: lifetimeRTF > 0 ? String(format: "%.1f×", lifetimeRTF) : "—",
                                  icon: "speedometer", subtitle: "во сколько раз быстрее реального времени")
-                        StatCard(title: "Первая запись", value: histStats.firstAt.map(shortDate) ?? "—", icon: "calendar.badge.plus")
+                        StatCard(title: "Первая запись", value: firstRecordDate.map(shortDate) ?? "—", icon: "calendar.badge.plus")
                         StatCard(title: "Последняя запись", value: histStats.lastAt.map(shortDate) ?? "—", icon: "calendar")
                     }
                 }

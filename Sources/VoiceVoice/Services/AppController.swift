@@ -61,6 +61,8 @@ final class AppController: ObservableObject {
         let micStatus = AVAuthStatus.audio
         DebugLog.log("App: bootstrap tapOk=\(tapOk) mic=\(micStatus.rawValue) onboardingDone=\(settings.onboardingDone) eagerLoad=\(settings.eagerLoad)")
 
+        migrateLifetimeStatsIfNeeded()
+
         if !settings.onboardingDone || !tapOk || micStatus != .authorized {
             onboardingNeeded = true
         }
@@ -75,6 +77,27 @@ final class AppController: ObservableObject {
         if settings.eagerLoad {
             transcriber.ensureLoaded()
         }
+    }
+
+    /// One-time backfill: lifetime counters were added after the app already had a
+    /// history table capped at 200 rows. To give the Dashboard meaningful baseline
+    /// numbers on first launch after upgrade, seed lifetime counters from whatever
+    /// is currently in the DB (up to 200 records). Subsequent dictations correctly
+    /// increment from this baseline.
+    private func migrateLifetimeStatsIfNeeded() {
+        guard !settings.lifetimeStatsMigrated else { return }
+        let s = history.stats()
+        if s.totalRecords > 0 {
+            settings.lifetimeRecordsCount    = s.totalRecords
+            settings.lifetimeCharactersCount = s.totalCharacters
+            settings.lifetimeAudioSeconds    = s.totalSeconds
+            settings.lifetimeProcessingMs    = s.totalProcessingMs
+            if let first = s.firstAt {
+                settings.firstRecordAt = first.timeIntervalSince1970
+            }
+            DebugLog.log("App: lifetime stats backfilled from DB — records=\(s.totalRecords), chars=\(s.totalCharacters)")
+        }
+        settings.lifetimeStatsMigrated = true
     }
 
     func dismissOnboarding() {
@@ -182,6 +205,18 @@ final class AppController: ObservableObject {
             record.id = id
         }
         lastResult = record
+
+        // Lifetime counters — the history table is trimmed to 200 rows, so we
+        // can't compute these from the DB after the fact. Increment on every
+        // transcription so the Dashboard shows true lifetime numbers.
+        settings.lifetimeRecordsCount    += 1
+        settings.lifetimeCharactersCount += appliedText.count
+        settings.lifetimeAudioSeconds    += duration
+        settings.lifetimeProcessingMs    += transcriber.lastProcessingMs
+        if settings.firstRecordAt == 0 {
+            settings.firstRecordAt = record.createdAt.timeIntervalSince1970
+        }
+
         DebugLog.log("App: finalize appliedLen=\(appliedText.count) autoPaste=\(settings.autoPaste)")
 
         // Transition to .complete and always hide the recording mic.

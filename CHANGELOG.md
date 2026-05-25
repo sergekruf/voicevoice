@@ -8,6 +8,15 @@
 - Голосовые команды над буфером обмена (`⌥ Option` удержание → LLM-преобразование текста).
 - GitHub Actions для авто-сборки `.app` и `.dmg` по тегу `v*`.
 
+## [1.0.2] — 2026-05-25
+
+### Исправлено
+- **Длинные диктовки (40–60+ с) теряли куски в середине.** Без явного `chunkingStrategy` WhisperKit падал в встроенный seek-loop: при провале одного 30-секундного окна (temperature-fallback exhaustion или `noSpeechThreshold`) seek прыгал вперёд на полные 30 секунд, теряя весь контент окна. Теперь используется `chunkingStrategy: .vad` — аудио режется по тишине через `VADAudioChunker`, провал одного чанка не влияет на соседей.
+- **Лимит выходных токенов**: `sampleLength` 224 → **448** (потолок Whisper). На плотной русской речи 224 иногда упирался в лимит и обрезал хвост окна.
+
+### Изменено
+- **Дашборд: счётчики «за всё время» вместо «последние 200»**. Таблица истории капится в 200 записей, и прежний `HistoryStore.stats()` считал по триммнутой таблице — счётчик «Всего расшифровок» упирался в 200 и не рос. Добавлены `AppStorage`-счётчики `lifetimeRecordsCount` / `lifetimeCharactersCount` / `lifetimeAudioSeconds` / `lifetimeProcessingMs` / `firstRecordAt`, инкрементируемые на каждой диктовке. При первом запуске на этой версии — одноразовая миграция: lifetime-поля заполняются из текущего содержимого БД (бэкфилл из имеющихся ≤ 200 записей).
+
 ## [1.0.1] — 2026-05-22
 
 ### Изменено
@@ -45,6 +54,7 @@
 - WhisperKit + CoreML/ANE
 - GRDB (SQLite-обёртка)
 
-[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.2
 [1.0.1]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.1
 [1.0.0]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.0
