@@ -28,8 +28,8 @@ enum STTEngine: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .whisperKit: return "WhisperKit (Whisper, по умолчанию)"
-        case .parakeet: return "Parakeet TDT v3 (быстрый, ~600 МБ)"
+        case .whisperKit: return "WhisperKit (Whisper, классический)"
+        case .parakeet: return "Parakeet TDT v3 (по умолчанию, быстрый)"
         }
     }
 }
@@ -61,8 +61,10 @@ final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
     @AppStorage("modelName") var modelName: String = WhisperModelChoice.largeV3TurboQuantized.rawValue
-    /// Active speech-to-text engine (WhisperKit vs Parakeet). See `STTEngine`.
-    @AppStorage("sttEngine") var sttEngineRaw: String = STTEngine.whisperKit.rawValue
+    /// Active speech-to-text engine. Default is Parakeet since 1.1.1 (faster, lighter,
+    /// recognition on par with Whisper for Russian). See `STTEngine`. Existing users keep
+    /// whatever they already selected — this default only applies to fresh installs.
+    @AppStorage("sttEngine") var sttEngineRaw: String = STTEngine.parakeet.rawValue
     @AppStorage("hotkey") var hotkeyRaw: String = HotkeyKind.fn.rawValue
     @AppStorage("autoPaste") var autoPaste: Bool = true
     @AppStorage("alwaysKeepInClipboard") var alwaysKeepInClipboard: Bool = false

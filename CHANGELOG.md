@@ -5,9 +5,14 @@
 ## [Unreleased]
 
 ### Запланировано
-- Бенчмарк качества Parakeet TDT v3 vs WhisperKit на русском (движок добавлен экспериментально в 1.1.0).
 - Голосовые команды над буфером обмена (`⌥ Option` удержание → LLM-преобразование текста).
 - GitHub Actions для авто-сборки `.app` и `.dmg` по тегу `v*`.
+
+## [1.1.1] — 2026-05-30
+
+### Изменено
+- **Parakeet TDT v3 — теперь движок по умолчанию.** После теста на реальной русской речи: очень быстро, качество распознавания не хуже WhisperKit. Существующие пользователи сохраняют свой выбор; новый дефолт — только для свежих установок. WhisperKit остаётся доступен в Настройки → Движок (чуть лучше с пунктуацией, шире поддержка языков). Снят ярлык «экспериментально».
+- **Всплывающие уведомления переехали в правый верхний угол** (стандартное место уведомлений macOS) — раньше висели внизу по центру и закрывали поле ввода в чатах (Claude Desktop, MAX, Telegram). Индикатор записи (микрофон) остался снизу по центру — это функциональный элемент, а не уведомление. Время показа без изменений.
 
 ## [1.1.0] — 2026-05-30
 
@@ -86,7 +91,8 @@
 - WhisperKit + CoreML/ANE
 - GRDB (SQLite-обёртка)
 
-[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/sergekruf/voicevoice/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/sergekruf/voicevoice/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.2
 [1.0.1]: https://github.com/sergekruf/voicevoice/releases/tag/v1.0.1

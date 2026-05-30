@@ -85,7 +85,9 @@ final class HUDManager {
 
     // MARK: - Panel presentation primitive
 
-    /// Build (or reuse) a bottom-center panel for any SwiftUI toast.
+    /// Build (or reuse) a top-right panel for any SwiftUI toast.
+    /// Toasts live in the top-right corner (standard macOS notification spot) so they
+    /// don't cover input fields — most apps put text input at the bottom or center.
     /// Uses fixed panel dimensions (generous enough for wrapped text) — the inner SwiftUI
     /// views constrain themselves to `.frame(maxWidth: 460)` and use `.fixedSize(vertical:true)`
     /// so multi-line text renders cleanly. Don't combine `sizingOptions = .preferredContentSize`
@@ -111,7 +113,7 @@ final class HUDManager {
         panel.contentViewController = hostController
         panel.setContentSize(size)
 
-        positionBottomCenter(panel, offsetY: bottomOffsetForToast())
+        positionTopRight(panel, margin: 16)
         panel.orderFrontRegardless()
 
         if let autohide {
@@ -120,12 +122,6 @@ final class HUDManager {
                 panelRef?.orderOut(nil)
             }
         }
-    }
-
-    /// Toasts sit above the recording mic when it's visible, otherwise hug the bottom.
-    private func bottomOffsetForToast() -> CGFloat {
-        if let mic = centerOverlayPanel, mic.isVisible { return 160 }
-        return 24
     }
 
     // MARK: - Panel factory + positioning
@@ -156,6 +152,20 @@ final class HUDManager {
         let h = panel.frame.height
         let x = frame.midX - w / 2
         let y = frame.minY + offsetY
+        panel.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
+    }
+
+    /// Top-right corner of the active screen's visible area (below the menu bar),
+    /// with a uniform margin. Used for toast notifications so they stay clear of
+    /// input fields, which apps typically place at the bottom or center.
+    private func positionTopRight(_ panel: NSPanel?, margin: CGFloat) {
+        guard let panel else { return }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        guard let frame = screen?.visibleFrame else { return }
+        let w = panel.frame.width
+        let h = panel.frame.height
+        let x = frame.maxX - w - margin
+        let y = frame.maxY - h - margin
         panel.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
     }
 }
