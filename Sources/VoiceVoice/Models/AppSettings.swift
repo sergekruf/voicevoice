@@ -17,6 +17,23 @@ enum HotkeyKind: String, CaseIterable, Identifiable {
     }
 }
 
+/// Движок распознавания речи. WhisperKit — дефолт (Whisper на ANE). Parakeet —
+/// опциональный быстрый движок на NVIDIA Parakeet TDT v3 через FluidAudio (модель
+/// ~600 МБ качается только при выборе).
+enum STTEngine: String, CaseIterable, Identifiable {
+    case whisperKit = "whisperKit"
+    case parakeet = "parakeet"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .whisperKit: return "WhisperKit (Whisper, по умолчанию)"
+        case .parakeet: return "Parakeet TDT v3 (быстрый, ~600 МБ)"
+        }
+    }
+}
+
 /// WhisperKit composes a folder-matching glob `*openai*{rawValue}/*` against
 /// argmaxinc/whisperkit-coreml on HuggingFace, so `rawValue` must be the model
 /// folder name WITHOUT the `openai_whisper-` prefix.
@@ -44,6 +61,8 @@ final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
     @AppStorage("modelName") var modelName: String = WhisperModelChoice.largeV3TurboQuantized.rawValue
+    /// Active speech-to-text engine (WhisperKit vs Parakeet). See `STTEngine`.
+    @AppStorage("sttEngine") var sttEngineRaw: String = STTEngine.whisperKit.rawValue
     @AppStorage("hotkey") var hotkeyRaw: String = HotkeyKind.fn.rawValue
     @AppStorage("autoPaste") var autoPaste: Bool = true
     @AppStorage("alwaysKeepInClipboard") var alwaysKeepInClipboard: Bool = false
@@ -80,6 +99,28 @@ final class AppSettings: ObservableObject {
     /// If true (default off), appends a context-appropriate emoji to the recognized text
     /// when a known trigger phrase is present (хаха → 😄, спасибо → 🙏, поздравляю → 🎉…).
     @AppStorage("autoEmoji") var autoEmoji: Bool = false
+    /// If true (default OFF, opt-in), recognized speech is auto-formatted into
+    /// markdown-ish lists: «первое… второе… третье…» → numbered list,
+    /// «список покупок: a, b, c, d» → bullets, «новый абзац» → \n\n. See
+    /// TextFormatter.swift for the full rule set. Off by default because it
+    /// inserts newlines, which break single-line input fields.
+    @AppStorage("autoFormat") var autoFormat: Bool = false
+    /// If true (default ON), post-process Whisper's sentence-final punctuation
+    /// with simple Russian rules: «ли»-particle and question-word starts force
+    /// `?`; long sentences without question markers ending in `?` get `.`. See
+    /// PunctuationFixer.swift.
+    @AppStorage("fixPunctuation") var fixPunctuation: Bool = true
+    /// If true (default ON), transcribe completed VAD chunks in the background WHILE
+    /// recording, so on key-release only the short trailing tail remains to decode —
+    /// long dictations feel near-instant. Output is identical to batch mode (same
+    /// silence-cut boundaries); this only changes WHEN chunks are decoded. Turn off
+    /// to revert to "transcribe everything on release".
+    @AppStorage("eagerTranscription") var eagerTranscription: Bool = true
+    /// User-editable list of Whisper hallucination phrases (one per line) that get
+    /// dropped from recognized text when they appear as a whole sentence. Seeded from
+    /// `Transcriber.defaultHallucinationBlocklistText`. Technical kill-tokens
+    /// (DimaTorzok etc.) are handled separately in code and not exposed here.
+    @AppStorage("hallucinationBlocklist") var hallucinationBlocklist: String = Transcriber.defaultHallucinationBlocklistText
     /// Master switch — when true, ALL HUDs / toasts / overlays are suppressed:
     /// recording mic, result HUD, learned-correction toast, ready toast, model-loading
     /// indicator. Useful for screencasts, presentations, focused work. Overrides the
@@ -102,6 +143,10 @@ final class AppSettings: ObservableObject {
 
     var hotkey: HotkeyKind {
         HotkeyKind(rawValue: hotkeyRaw) ?? .fn
+    }
+
+    var sttEngine: STTEngine {
+        STTEngine(rawValue: sttEngineRaw) ?? .whisperKit
     }
 
     private init() {

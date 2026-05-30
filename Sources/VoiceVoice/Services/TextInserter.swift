@@ -152,12 +152,15 @@ final class TextInserter {
             // but return `.pastedNoAutoLearn` so AppController surfaces a HUD with the
             // Edit & Learn button — auto-learn watcher physically can't track edits in
             // these apps, and this is the only way for the user to teach the dictionary.
-            // We also leave the transient-marked write in the clipboard as a fallback for
-            // the rare app where ⌘V didn't land — clipboard managers ignore the marker.
+            //
+            // Clipboard finalize is symmetric with the `.editable` branch:
+            //   • alwaysKeepInClipboard = true  → promote our transient write to a plain
+            //     entry so clipboard managers pick it up;
+            //   • alwaysKeepInClipboard = false → restore the saved snapshot, otherwise
+            //     the user's next ⌘V re-pastes the dictation (TransientType marker is
+            //     only respected by clipboard managers, not by the system pasteboard).
             DebugLog.log("Paste: AX unverifiable — trusting tier1, no auto-learn possible (HUD with Edit & Learn)")
-            if keepInClipboard {
-                writePlainText(text)
-            }
+            await finalizeAfterPaste(text: text, keepInClipboard: keepInClipboard, savedClipboard: savedClipboard)
             return .pastedNoAutoLearn
         }
 

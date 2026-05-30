@@ -131,6 +131,13 @@ final class AudioRecorder {
         bufferQueue.sync { Double(buffer.count) / Self.targetSampleRate }
     }
 
+    /// Thread-safe snapshot of the audio captured so far, without stopping the
+    /// engine. Used by the eager-streaming transcriber to decode completed chunks
+    /// while recording continues.
+    func currentSamples() -> [Float] {
+        bufferQueue.sync { buffer }
+    }
+
     /// Route `AVAudioEngine`'s inputNode through a specific CoreAudio device.
     /// Must be called before `engine.start()`.
     private func setEngineInputDevice(_ deviceID: AudioDeviceID) throws {

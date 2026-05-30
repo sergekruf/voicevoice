@@ -3,6 +3,12 @@ import SwiftUI
 struct MenuBarContent: View {
     @ObservedObject private var controller = AppController.shared
     @ObservedObject private var transcriber = Transcriber.shared
+    @ObservedObject private var parakeet = ParakeetTranscriber.shared
+    @ObservedObject private var settings = AppSettings.shared
+
+    private var engineState: Transcriber.ModelState {
+        settings.sttEngine == .parakeet ? parakeet.state : transcriber.state
+    }
 
     var body: some View {
         // Opening the menu is a strong signal the user will record soon → warm the model.
@@ -31,7 +37,7 @@ struct MenuBarContent: View {
     }
 
     private var statusText: String {
-        switch (controller.state, transcriber.state) {
+        switch (controller.state, engineState) {
         case (.recording, _): return "● Идёт запись"
         case (.transcribing, _): return "○ Распознавание…"
         case (_, .downloading(let p)): return "Загрузка модели \(Int(p * 100))%"

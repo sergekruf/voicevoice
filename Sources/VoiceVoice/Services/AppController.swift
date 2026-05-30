@@ -30,6 +30,12 @@ final class AppController: ObservableObject {
     private let hotkeys = HotkeyMonitor.shared
 
     private var transcriberObserver: AnyCancellable?
+    private var parakeetObserver: AnyCancellable?
+
+    // Transient Esc-to-cancel monitors, installed only while recording.
+    private var escMonitorGlobal: Any?
+    private var escMonitorLocal: Any?
+    private static let escKeyCode = 53
 
     private init() {
         recorder.onLevel = { [weak self] level in
@@ -41,16 +47,28 @@ final class AppController: ObservableObject {
         hotkeys.onPress = { [weak self] in self?.handlePress() }
         hotkeys.onRelease = { [weak self] in self?.handleRelease() }
 
-        // Show / hide the loading indicator automatically as the transcriber's state changes.
+        // Show / hide the loading indicator automatically as the ACTIVE engine's state
+        // changes. Each observer ignores changes when its engine isn't the active one,
+        // otherwise the idle engine (always .notLoaded) would falsely show "loading".
+        let apply: (Transcriber.ModelState) -> Void = { state in
+            switch state {
+            case .ready:
+                HUDManager.shared.hideLoadingIndicator()
+            case .notLoaded, .loading, .downloading, .error:
+                HUDManager.shared.showLoadingIndicator()
+            }
+        }
         transcriberObserver = transcriber.$state
             .receive(on: DispatchQueue.main)
-            .sink { state in
-                switch state {
-                case .ready:
-                    HUDManager.shared.hideLoadingIndicator()
-                case .notLoaded, .loading, .downloading, .error:
-                    HUDManager.shared.showLoadingIndicator()
-                }
+            .sink { [weak self] state in
+                guard self?.settings.sttEngine == .whisperKit else { return }
+                apply(state)
+            }
+        parakeetObserver = ParakeetTranscriber.shared.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard self?.settings.sttEngine == .parakeet else { return }
+                apply(state)
             }
     }
 
@@ -75,7 +93,7 @@ final class AppController: ObservableObject {
         // (Fn press, menu open, window open). Opt in to eager load via Settings if
         // you want first Fn press to be instant at the cost of slower startup.
         if settings.eagerLoad {
-            transcriber.ensureLoaded()
+            ensureActiveEngineLoaded()
         }
     }
 
@@ -106,7 +124,7 @@ final class AppController: ObservableObject {
         onboardingNeeded = false
         hotkeys.start(with: settings.hotkey)
         if settings.eagerLoad {
-            transcriber.ensureLoaded()
+            ensureActiveEngineLoaded()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             HUDManager.shared.showReady()
@@ -116,7 +134,15 @@ final class AppController: ObservableObject {
     /// Triggered by any UI affordance the user touches (menu icon, settings, recording start).
     /// Acts as a no-op if the model is already loaded or loading.
     func warmUpIfNeeded() {
-        transcriber.ensureLoaded()
+        ensureActiveEngineLoaded()
+    }
+
+    /// Load whichever engine is currently selected (WhisperKit or Parakeet).
+    private func ensureActiveEngineLoaded() {
+        switch settings.sttEngine {
+        case .whisperKit: transcriber.ensureLoaded()
+        case .parakeet: ParakeetTranscriber.shared.ensureLoaded()
+        }
     }
 
     func reconfigureHotkey(_ kind: HotkeyKind) {
@@ -135,14 +161,65 @@ final class AppController: ObservableObject {
         }
         // Lazy load: ensure the model starts loading in the background while we record.
         // If the user holds Fn for several seconds, the model is usually ready by release.
-        transcriber.ensureLoaded()
+        ensureActiveEngineLoaded()
         do {
             try recorder.start()
             state = .recording(level: 0)
             HUDManager.shared.showRecording()
+            installEscMonitor()
+            // Eager streaming: decode completed VAD chunks in the background while the
+            // user keeps speaking, so on release only the trailing tail remains.
+            // WhisperKit-only — Parakeet is fast enough and has no 223-token cap, so
+            // it just transcribes the whole buffer on release.
+            if settings.eagerTranscription && settings.sttEngine == .whisperKit {
+                transcriber.startStreaming(samples: { [weak self] in
+                    self?.recorder.currentSamples() ?? []
+                })
+            }
         } catch {
             state = .error(error.localizedDescription)
         }
+    }
+
+    // MARK: - Cancel (Esc)
+
+    /// Install a transient Esc watcher for the duration of recording. Passive monitors
+    /// (can't consume the event), so Esc also reaches the frontmost app — acceptable,
+    /// since during dictation the user isn't typing into it. Both global (other apps
+    /// focused) and local (our own window focused) are needed to catch Esc anywhere.
+    private func installEscMonitor() {
+        removeEscMonitor()
+        escMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if Int(event.keyCode) == AppController.escKeyCode {
+                Task { @MainActor in self?.cancelDictation() }
+            }
+        }
+        escMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if Int(event.keyCode) == AppController.escKeyCode {
+                self?.cancelDictation()
+                return nil   // consume so our own UI doesn't also react
+            }
+            return event
+        }
+    }
+
+    private func removeEscMonitor() {
+        if let m = escMonitorGlobal { NSEvent.removeMonitor(m) }
+        if let m = escMonitorLocal { NSEvent.removeMonitor(m) }
+        escMonitorGlobal = nil
+        escMonitorLocal = nil
+    }
+
+    /// Abort the current dictation without transcribing or pasting. Triggered by Esc
+    /// while recording — protects the focused field from accidental/garbled input.
+    func cancelDictation() {
+        guard case .recording = state else { return }
+        DebugLog.log("App: dictation cancelled via Esc")
+        removeEscMonitor()
+        recorder.cancel()
+        transcriber.cancelStreaming()
+        state = .idle
+        HUDManager.shared.hideRecording()
     }
 
     private func handleRelease() {
@@ -150,6 +227,7 @@ final class AppController: ObservableObject {
             DebugLog.log("App: handleRelease bailing, state was \(state)")
             return
         }
+        removeEscMonitor()
         let samples = recorder.stop()
         let duration = Double(samples.count) / AudioRecorder.targetSampleRate
         // RMS / peak of the captured buffer — confirms the mic actually picked up sound.
@@ -169,18 +247,37 @@ final class AppController: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-            let rawText = await self.transcriber.transcribe(audio: samples)
+            // Route to the active engine. WhisperKit: finishStreaming finishes an
+            // in-flight eager session (decodes only the trailing tail + joins committed
+            // chunks), or falls back to a full transcription if streaming never started.
+            // Parakeet: one shot on the whole buffer (no eager, no 223-token cap).
+            let rawText: String
+            switch self.settings.sttEngine {
+            case .parakeet:
+                rawText = await ParakeetTranscriber.shared.transcribe(audio: samples)
+            case .whisperKit:
+                rawText = await self.transcriber.finishStreaming(finalSamples: samples)
+            }
             await MainActor.run {
+                let procMs = self.settings.sttEngine == .parakeet
+                    ? ParakeetTranscriber.shared.lastProcessingMs
+                    : self.transcriber.lastProcessingMs
                 DebugLog.log("App: transcribe finished, rawLen=\(rawText.count) text=\(rawText.prefix(80))")
-                self.finalize(rawText: rawText, duration: duration)
+                self.finalize(rawText: rawText, duration: duration, processingMs: procMs)
             }
         }
     }
 
-    private func finalize(rawText: String, duration: Double) {
+    private func finalize(rawText: String, duration: Double, processingMs: Int) {
         let applyResult = applier.apply(to: rawText)
         let dictText = applyResult.text
         var appliedText = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
+        if settings.fixPunctuation {
+            appliedText = PunctuationFixer.fix(appliedText)
+        }
+        if settings.autoFormat {
+            appliedText = TextFormatter.format(appliedText)
+        }
         if settings.autoEmoji {
             appliedText = EmojiEnhancer.enhance(appliedText)
         }
@@ -198,7 +295,7 @@ final class AppController: ObservableObject {
             appliedText: appliedText,
             finalText: appliedText,
             durationSeconds: duration,
-            processingMs: transcriber.lastProcessingMs,
+            processingMs: processingMs,
             createdAt: Date()
         )
         if let id = history.add(record) {
@@ -212,7 +309,7 @@ final class AppController: ObservableObject {
         settings.lifetimeRecordsCount    += 1
         settings.lifetimeCharactersCount += appliedText.count
         settings.lifetimeAudioSeconds    += duration
-        settings.lifetimeProcessingMs    += transcriber.lastProcessingMs
+        settings.lifetimeProcessingMs    += processingMs
         if settings.firstRecordAt == 0 {
             settings.firstRecordAt = record.createdAt.timeIntervalSince1970
         }

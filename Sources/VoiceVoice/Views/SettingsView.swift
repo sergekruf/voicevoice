@@ -42,20 +42,38 @@ struct HelpHint: View {
 struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var transcriber = Transcriber.shared
+    @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @State private var inputDevices: [AudioInputDevice] = []
     @State private var defaultInputName: String = ""
+
+    /// State of whichever engine is currently selected.
+    private var activeState: Transcriber.ModelState {
+        settings.sttEngine == .parakeet ? parakeet.state : transcriber.state
+    }
 
     var body: some View {
         Form {
             Section("Модель распознавания") {
-                Picker(selection: $settings.modelName) {
-                    ForEach(WhisperModelChoice.allCases) { m in
-                        Text(m.displayName).tag(m.rawValue)
+                Picker(selection: $settings.sttEngineRaw) {
+                    ForEach(STTEngine.allCases) { e in
+                        Text(e.displayName).tag(e.rawValue)
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Text("Модель")
-                        HelpHint(text: "Какую модель Whisper использовать для распознавания. Крупные модели точнее, но потребляют больше RAM и дольше работают. Квантованные (4-bit) — компромисс: занимают меньше памяти при незначительной потере качества.")
+                        Text("Движок")
+                        HelpHint(text: "Какой движок распознавания использовать. WhisperKit (по умолчанию) — Whisper на Apple Neural Engine, проверенный, поддерживает много языков. Parakeet TDT v3 — экспериментальный быстрый движок (NVIDIA, через FluidAudio): ~5× быстрее и меньше памяти, поддерживает русский, но слабее расставляет знаки препинания (компенсируется пост-обработкой). При первом выборе Parakeet скачается отдельная модель (~600 МБ). Совет: сравните качество на своей речи, прежде чем переключаться насовсем.")
+                    }
+                }
+                if settings.sttEngine == .whisperKit {
+                    Picker(selection: $settings.modelName) {
+                        ForEach(WhisperModelChoice.allCases) { m in
+                            Text(m.displayName).tag(m.rawValue)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Модель Whisper")
+                            HelpHint(text: "Какую модель Whisper использовать для распознавания. Крупные модели точнее, но потребляют больше RAM и дольше работают. Квантованные (4-bit) — компромисс: занимают меньше памяти при незначительной потере качества.")
+                        }
                     }
                 }
                 HStack {
@@ -65,10 +83,14 @@ struct SettingsView: View {
                     Button("Загрузить сейчас") {
                         AppController.shared.warmUpIfNeeded()
                     }
-                    .disabled(transcriber.state == .ready)
+                    .disabled(activeState == .ready)
                     HelpHint(text: "Принудительно начать загрузку выбранной модели сейчас. Полезно, если выключена опция «Грузить при запуске» и хочется подготовить модель заранее, до первой диктовки.")
                     Button("Перезагрузить") {
-                        transcriber.reloadIfModelChanged()
+                        if settings.sttEngine == .parakeet {
+                            parakeet.reload()
+                        } else {
+                            transcriber.reloadIfModelChanged()
+                        }
                     }
                     HelpHint(text: "Перезагрузить модель в память. Используйте, если сменили модель в списке выше или столкнулись с подозрительным поведением распознавания.")
                 }
@@ -76,6 +98,12 @@ struct SettingsView: View {
                     HStack(spacing: 4) {
                         Text("Грузить модель при запуске приложения")
                         HelpHint(text: "Если включено, модель готова сразу — но запуск приложения занимает на 3–10 секунд дольше. Если выключено (по умолчанию), приложение стартует мгновенно, модель грузится при первом нажатии Fn или при открытии меню.")
+                    }
+                }
+                Toggle(isOn: $settings.eagerTranscription) {
+                    HStack(spacing: 4) {
+                        Text("Распознавать во время записи")
+                        HelpHint(text: "Если включено (по умолчанию), VoiceVoice распознаёт законченные куски речи прямо во время диктовки, пока ты ещё говоришь. На отпускании Fn остаётся распознать только короткий хвост — для длинных диктовок текст появляется почти мгновенно. Результат идентичен обычному режиму (те же границы по тишине), меняется только момент распознавания. Выключи, если хочешь распознавать всё разом на отпускании клавиши.")
                     }
                 }
             }
@@ -163,6 +191,20 @@ struct SettingsView: View {
                     }
                 }
 
+                Toggle(isOn: $settings.fixPunctuation) {
+                    HStack(spacing: 4) {
+                        Text("Исправлять знаки в конце предложений")
+                        HelpHint(text: "Whisper-turbo 4-bit иногда ошибается со знаком в конце предложения (вопрос → точка, утверждение → вопрос). Простые русские правила исправляют очевидные случаи:\n\n• Частица «ли» в предложении («Был ли ты вчера», «Можно ли это») → терминатор становится «?».\n• Предложение начинается с вопросительного слова (что / где / когда / почему / куда / откуда / зачем / кто / сколько / разве / неужели), допустимо после дискурсивных «А / Ну / Так / И» — «.» меняется на «?».\n• Длинное предложение (≥ 5 слов) без вопросительных маркеров, оканчивающееся на «?» → меняется на «.» (вероятно, Whisper неверно интерпретировал интонацию).\n\nЗнак «!» не трогается — восклицание и эмоциональный вопрос неразличимы без аудио. Слова «как» и «какой» не считаются вопросительными — они часто восклицания («Как красиво!»).")
+                    }
+                }
+
+                Toggle(isOn: $settings.autoFormat) {
+                    HStack(spacing: 4) {
+                        Text("Авто-форматирование (списки, абзацы)")
+                        HelpHint(text: "Если включено, распознанная речь автоматически форматируется:\n• Перечисления «первое… второе… третье…» (3+ подряд) превращаются в нумерованный список.\n• Конструкции «список покупок: хлеб, молоко, масло, сыр» (3+ элемента через запятую после двоеточия) — в маркированный список.\n• Фразы «новый абзац», «с новой строки» вставляют перевод строки.\n\nЕсли результат не нравится для конкретного приложения (например, узкое однострочное поле) — выключи тоггл, и текст пойдёт одной строкой как раньше.")
+                    }
+                }
+
                 Toggle(isOn: $settings.autoEmoji) {
                     HStack(spacing: 4) {
                         Text("Автоматически добавлять смайлы")
@@ -202,6 +244,22 @@ struct SettingsView: View {
                         Text("\(settings.minConfirmedToApply)").bold()
                     }
                 }
+            }
+            Section("Фильтр галлюцинаций") {
+                HStack(spacing: 4) {
+                    Text("Фразы для удаления (по одной на строку)")
+                        .font(.subheadline)
+                    HelpHint(text: "Whisper на тишине/шуме иногда выдаёт заученные с YouTube «титры» («Спасибо за просмотр», «Подписывайтесь на канал» и т.п.). Эти фразы удаляются из результата, но только если совпадают с ЦЕЛЫМ предложением — настоящая речь («Спасибо за внимание, коллеги») не страдает. Добавляй сюда артефакты, которые встречаешь у себя. Технические мусорные вставки (DimaTorzok, amara.org, «Редактор субтитров…») отсекаются автоматически и в этот список добавлять не нужно.")
+                    Spacer()
+                    Button("Сбросить") {
+                        settings.hallucinationBlocklist = Transcriber.defaultHallucinationBlocklistText
+                    }
+                    .controlSize(.small)
+                }
+                TextEditor(text: $settings.hallucinationBlocklist)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minHeight: 96)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
             }
             Section("О приложении") {
                 LabeledContent {
@@ -274,7 +332,7 @@ struct SettingsView: View {
     }
 
     private var modelStatus: String {
-        switch transcriber.state {
+        switch activeState {
         case .notLoaded: return "не загружено"
         case .downloading(let p): return "загрузка \(Int(p * 100))%"
         case .loading: return "инициализация"

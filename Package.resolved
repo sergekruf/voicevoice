@@ -1,6 +1,15 @@
 {
-  "originHash" : "cf54551151cd768c9bff33d8eae6aa58893891b9a4588bac21761c9633073d2f",
+  "originHash" : "9ec2d2a10ee5ad9ae9ae39d08e24c76d07664a18c1155bad0742bd690c1d7d36",
   "pins" : [
+    {
+      "identity" : "fluidaudio",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/FluidInference/FluidAudio.git",
+      "state" : {
+        "revision" : "8048812869b0c7c6fa393e564a4fb6f95126ba23",
+        "version" : "0.14.7"
+      }
+    },
     {
       "identity" : "grdb.swift",
       "kind" : "remoteSourceControl",

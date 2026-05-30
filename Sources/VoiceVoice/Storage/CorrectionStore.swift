@@ -72,6 +72,38 @@ final class CorrectionStore {
         }
     }
 
+    /// Add (or reinforce) a correction the user typed in by hand. Seeds
+    /// `confirmedCount` high enough (3) that it's immediately auto-applied and
+    /// survives a couple of accidental rejections — the user is certain about a
+    /// manual entry, unlike an auto-learned one. `wrong` is lowercased to match the
+    /// applier's case-insensitive comparison.
+    func addManual(wrong: String, right: String, contextBefore: String? = nil) {
+        let w = wrong.lowercased()
+        let ctx = (contextBefore?.isEmpty == true) ? nil : contextBefore
+        try? db.write { db in
+            if var existing = try CorrectionEntry
+                .filter(CorrectionEntry.Columns.wrong == w)
+                .filter(CorrectionEntry.Columns.right == right)
+                .filter(CorrectionEntry.Columns.contextBefore == ctx)
+                .fetchOne(db) {
+                existing.confirmedCount = max(existing.confirmedCount + 1, 3)
+                existing.lastUsedAt = Date()
+                try existing.update(db)
+            } else {
+                var entry = CorrectionEntry(
+                    wrong: w,
+                    right: right,
+                    contextBefore: ctx,
+                    confirmedCount: 3,
+                    rejectedCount: 0,
+                    createdAt: Date(),
+                    lastUsedAt: Date()
+                )
+                try entry.insert(db)
+            }
+        }
+    }
+
     func recordRejection(wrong: String, right: String, contextBefore: String? = nil) {
         try? db.write { db in
             if var existing = try CorrectionEntry

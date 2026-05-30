@@ -10,6 +10,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.29.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4"),
     ],
     targets: [
         .executableTarget(
@@ -17,6 +18,7 @@ let package = Package(
             dependencies: [
                 "WhisperKit",
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "Sources/VoiceVoice",
             exclude: ["Resources/Info.plist", "Resources/VoiceVoice.entitlements"]

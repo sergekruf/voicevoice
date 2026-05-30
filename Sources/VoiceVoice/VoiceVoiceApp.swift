@@ -18,6 +18,14 @@ struct VoiceVoiceApp: App {
 private struct MenuBarLabel: View {
     @ObservedObject private var controller = AppController.shared
     @ObservedObject private var transcriber = Transcriber.shared
+    @ObservedObject private var parakeet = ParakeetTranscriber.shared
+    @ObservedObject private var settings = AppSettings.shared
+
+    /// State of whichever engine is currently selected.
+    private var engineState: Transcriber.ModelState {
+        settings.sttEngine == .parakeet ? parakeet.state : transcriber.state
+    }
+
     var body: some View {
         switch controller.state {
         case .recording: Image(systemName: "mic.fill").foregroundStyle(.red)
@@ -25,7 +33,7 @@ private struct MenuBarLabel: View {
         case .complete: Image(systemName: "mic")
         case .error: Image(systemName: "mic.slash")
         case .idle:
-            switch transcriber.state {
+            switch engineState {
             case .downloading, .loading, .notLoaded: Image(systemName: "mic.badge.plus")
             case .error: Image(systemName: "mic.slash")
             case .ready: Image(systemName: "mic")
