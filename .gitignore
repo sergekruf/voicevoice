@@ -36,3 +36,9 @@ PROMOTION.md
 NOTES.md
 TODO.md
 
+
+# ML-инструменты конвертации (torch venv, модели) — не коммитить
+.mltools/
+
+# RUPunct-модель пунктуации — бандлится в .app, но НЕ в git (большая); локально для сборки
+Sources/VoiceVoice/Resources/RUPunct/

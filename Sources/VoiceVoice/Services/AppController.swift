@@ -135,6 +135,7 @@ final class AppController: ObservableObject {
     /// Acts as a no-op if the model is already loaded or loading.
     func warmUpIfNeeded() {
         ensureActiveEngineLoaded()
+        if settings.punctuationModel { RUPunctService.shared.ensureLoaded() }
     }
 
     /// Load whichever engine is currently selected (WhisperKit or Parakeet).
@@ -251,12 +252,17 @@ final class AppController: ObservableObject {
             // in-flight eager session (decodes only the trailing tail + joins committed
             // chunks), or falls back to a full transcription if streaming never started.
             // Parakeet: one shot on the whole buffer (no eager, no 223-token cap).
-            let rawText: String
+            var rawText: String
             switch self.settings.sttEngine {
             case .parakeet:
                 rawText = await ParakeetTranscriber.shared.transcribe(audio: samples)
             case .whisperKit:
                 rawText = await self.transcriber.finishStreaming(finalSamples: samples)
+            }
+            // Neural punctuation/casing restoration (opt-in) — on the raw STT text,
+            // before the rest of the pipeline; replaces the regex PunctuationFixer.
+            if self.settings.punctuationModel {
+                rawText = await RUPunctService.shared.punctuate(rawText)
             }
             await MainActor.run {
                 let procMs = self.settings.sttEngine == .parakeet
@@ -272,7 +278,9 @@ final class AppController: ObservableObject {
         let applyResult = applier.apply(to: rawText)
         let dictText = applyResult.text
         var appliedText = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
-        if settings.fixPunctuation {
+        // Regex punctuation fixer — skipped when the neural model already restored
+        // punctuation upstream (handled in handleRelease before finalize).
+        if settings.fixPunctuation && !settings.punctuationModel {
             appliedText = PunctuationFixer.fix(appliedText)
         }
         if settings.autoFormat {
@@ -358,6 +366,37 @@ final class AppController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             if case .complete = self?.state { self?.state = .idle }
         }
+    }
+
+    // MARK: - File transcription (offline)
+
+    /// Transcribe arbitrary audio samples (decoded from a file) through the ACTIVE engine
+    /// and the same text pipeline as live dictation — but WITHOUT paste / HUD / history /
+    /// auto-learn. Used by the "Транскрибировать файл…" feature. Long files are chunked
+    /// by the engine's own `transcribe(audio:)`.
+    func transcribeAudioSamples(_ samples: [Float]) async -> String {
+        var raw: String
+        switch settings.sttEngine {
+        case .parakeet: raw = await ParakeetTranscriber.shared.transcribe(audio: samples)
+        case .whisperKit: raw = await transcriber.transcribe(audio: samples)
+        }
+        if settings.punctuationModel {
+            raw = await RUPunctService.shared.punctuate(raw)
+        }
+        return applyTextPipeline(raw)
+    }
+
+    /// Post-recognition text pipeline shared with live dictation (dictionary → numbers →
+    /// punctuation → format → emoji), minus the stats/paste side-effects of `finalize`.
+    private func applyTextPipeline(_ rawText: String) -> String {
+        guard !rawText.isEmpty else { return rawText }
+        let dictText = applier.apply(to: rawText).text
+        var t = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
+        // Skip the regex fixer when the neural model already restored punctuation.
+        if settings.fixPunctuation && !settings.punctuationModel { t = PunctuationFixer.fix(t) }
+        if settings.autoFormat { t = TextFormatter.format(t) }
+        if settings.autoEmoji { t = EmojiEnhancer.enhance(t) }
+        return t
     }
 
     // MARK: - Edit & Learn

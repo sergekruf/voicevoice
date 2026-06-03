@@ -62,7 +62,16 @@ final class HUDManager {
         // Height grows with number of correction pairs shown (max 3 + "…and N more").
         let rowCount = min(corrections.count, 3) + (corrections.count > 3 ? 1 : 0)
         let height = CGFloat(64 + rowCount * 22)
-        present(view: LearnedToast(corrections: corrections), ref: &learnedPanel, size: NSSize(width: 500, height: height), autohide: 4.0)
+        // Undo removes the just-learned pair(s) from the dictionary and dismisses the toast.
+        let onUndo: () -> Void = { [weak self] in
+            for c in corrections {
+                CorrectionStore.shared.removeLearned(wrong: c.wrong, right: c.right)
+            }
+            DebugLog.log("Watcher: user UNDID \(corrections.count) learned pair(s) via toast")
+            self?.learnedPanel?.orderOut(nil)
+        }
+        // 6s (vs 4s for passive toasts) — the toast is now interactive, give time to react.
+        present(view: LearnedToast(corrections: corrections, onUndo: onUndo), ref: &learnedPanel, size: NSSize(width: 520, height: height), autohide: 6.0)
     }
 
     // MARK: - Model loading

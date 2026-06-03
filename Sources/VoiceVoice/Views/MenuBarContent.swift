@@ -25,6 +25,13 @@ struct MenuBarContent: View {
         }
         .disabled(controller.lastResult == nil)
 
+        Button("Транскрибировать файл…") {
+            WindowOpener.openFileTranscribe()
+            FileTranscribeController.shared.promptAndStart()
+        }
+
+        Divider()
+
         Button("Дашборд…") { WindowOpener.openDashboard() }
         Button("История…") { WindowOpener.openHistory() }
         Button("Словарь правок…") { WindowOpener.openDictionary() }

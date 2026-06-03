@@ -5,11 +5,37 @@ import SwiftUI
 enum WindowOpener {
     private static var mainWindow: NSWindow?
     private static var onboardingWindow: NSWindow?
+    private static var fileWindow: NSWindow?
 
     static func openDashboard()  { openMain(tab: .dashboard) }
     static func openHistory()    { openMain(tab: .history) }
     static func openDictionary() { openMain(tab: .dictionary) }
     static func openSettings()   { openMain(tab: .settings) }
+
+    static func openFileTranscribe() {
+        if let w = fileWindow {
+            ensureRegularActivation()
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let host = NSHostingController(rootView: FileTranscribeView())
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 520),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Транскрибировать файл"
+        w.center()
+        w.contentViewController = host
+        w.isReleasedWhenClosed = false
+        w.delegate = WindowDelegate.shared
+        fileWindow = w
+        ensureRegularActivation()
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     private static func openMain(tab: MainTab) {
         MainWindowState.shared.tab = tab
@@ -77,7 +103,7 @@ enum WindowOpener {
     }
 
     static func updateActivationPolicy() {
-        let anyOpen = [mainWindow, onboardingWindow].contains { $0?.isVisible == true }
+        let anyOpen = [mainWindow, onboardingWindow, fileWindow].contains { $0?.isVisible == true }
         let desired: NSApplication.ActivationPolicy = anyOpen ? .regular : .accessory
         if NSApp.activationPolicy() != desired {
             NSApp.setActivationPolicy(desired)

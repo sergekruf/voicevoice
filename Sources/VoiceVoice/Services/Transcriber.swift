@@ -28,7 +28,7 @@ final class Transcriber: ObservableObject {
     // that on key-release only the trailing (uncommitted) audio remains to decode.
     // See startStreaming / finishStreaming.
     private var streamTask: Task<Void, Never>?
-    private var streamPieces: [String] = []
+    private var streamPieces: [(text: String, realPauseAfter: Bool)] = []
     private var streamCommittedOffset: Int = 0
     private var streamingActive = false
     /// Accumulated decode wall-time across all eager chunks of the current session,
@@ -177,21 +177,10 @@ final class Transcriber: ObservableObject {
 
         let start = Date()
         let usePunctPrompt = settings.punctuationPrompt && !punctuationPromptTokens.isEmpty
-
-        var cleaned = await runDecode(audio: audio, pipe: pipe, usePunctPrompt: usePunctPrompt)
-
-        // Safety net: на некоторых моделях (например `large-v3-turbo` full precision)
-        // punctuation-prompt ломает декодер — он сразу выдаёт EOT, и результат пустой
-        // на ВСЕХ чанках, хотя аудио явно содержит речь. Промпт затачивался под 4-bit,
-        // где он спасает пунктуацию; на full-precision пользы почти нет (см. README/
-        // настройки), а вот пустой вывод — катастрофа. Если с промптом получили
-        // пусто — молча перераспознаём без промпта. Тоггл становится безопасным:
-        // помогает где работает, тихо деградирует где ломает.
-        if cleaned.isEmpty && usePunctPrompt {
-            DebugLog.log("Transcribe: empty result WITH punctuation prompt — retrying WITHOUT prompt")
-            cleaned = await runDecode(audio: audio, pipe: pipe, usePunctPrompt: false)
-        }
-
+        // Пустые куски (включая случай, когда punctuation-prompt ломает декодер) спасает
+        // per-chunk rescue-ретрай внутри `decodeOneChunk` — отдельный whole-audio fallback
+        // больше не нужен.
+        let cleaned = await runDecode(audio: audio, pipe: pipe, usePunctPrompt: usePunctPrompt)
         lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
         DebugLog.log("Transcribe: done in \(lastProcessingMs)ms, len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
         return cleaned
@@ -207,7 +196,7 @@ final class Transcriber: ObservableObject {
     /// the perceived latency for long dictations drops to near-zero.
     ///
     /// Output parity with batch: the chunk boundaries use the SAME silence-cut logic
-    /// as `preChunk`, so the joined transcript matches what batch mode would produce.
+    /// as `chunkBySilence`, so the joined transcript matches what batch mode would produce.
     func startStreaming(samples: @escaping () -> [Float]) {
         cancelStreaming()
         ensureLoaded()
@@ -233,7 +222,7 @@ final class Transcriber: ObservableObject {
             // the trailing edge always has room to be cut on silence rather than mid-word.
             guard snap.count - streamCommittedOffset >= Self.maxChunkSamples else { continue }
 
-            let cut = Self.findSilenceCut(in: snap, from: streamCommittedOffset, upTo: snap.count, vad: vad)
+            let (cut, realPause) = Self.findSilenceCut(in: snap, from: streamCommittedOffset, upTo: snap.count, vad: vad)
             guard cut > streamCommittedOffset else { continue }
 
             // Recompute per-iteration so the prompt is picked up once tokens populate
@@ -241,14 +230,13 @@ final class Transcriber: ObservableObject {
             let usePunctPrompt = settings.punctuationPrompt && !punctuationPromptTokens.isEmpty
             let chunk = Array(snap[streamCommittedOffset..<cut])
             let t0 = Date()
-            var text = await runDecode(audio: chunk, pipe: pipe, usePunctPrompt: usePunctPrompt)
-            if text.isEmpty && usePunctPrompt {
-                text = await runDecode(audio: chunk, pipe: pipe, usePunctPrompt: false)
-            }
+            // decodeOneChunk includes the empty-rescue retry → eager chunks no longer
+            // silently lose ~12 с of speech when Whisper returns empty.
+            let text = await decodeOneChunk(chunk, pipe: pipe, usePunctPrompt: usePunctPrompt)
             streamDecodeMs += Int(Date().timeIntervalSince(t0) * 1000)
-            if !text.isEmpty { streamPieces.append(text) }
+            if !text.isEmpty { streamPieces.append((text, realPause)) }
             streamCommittedOffset = cut
-            DebugLog.log("Stream: committed chunk up to \(cut) (\(text.count) chars), pieces=\(streamPieces.count)")
+            DebugLog.log("Stream: committed chunk up to \(cut) (\(text.count) chars, realPause=\(realPause)), pieces=\(streamPieces.count)")
         }
     }
 
@@ -268,20 +256,22 @@ final class Transcriber: ObservableObject {
         _ = await streamTask?.value   // wait for the in-flight chunk to commit
         streamTask = nil
 
-        var pieces = streamPieces
+        var items = streamPieces
         let totalDecodeMs = streamDecodeMs
         let tailStart = min(streamCommittedOffset, finalSamples.count)
         let tail = tailStart < finalSamples.count ? Array(finalSamples[tailStart...]) : []
-        DebugLog.log("Stream: finishing — committed=\(tailStart), tail=\(tail.count) samples, pieces=\(pieces.count)")
+        DebugLog.log("Stream: finishing — committed=\(tailStart), tail=\(tail.count) samples, pieces=\(items.count)")
         var tailMs = 0
-        if tail.count >= Int(AudioRecorder.targetSampleRate * 0.25) {
-            // Tail can itself be longer than one chunk (if the last <800ms tick didn't
-            // commit, or audio grew between snapshot and release) — transcribe() handles
-            // its own pre-chunking + empty-prompt fallback.
+        // Tail может быть длиннее одного куска → чанкуем его так же (с флагами пауз +
+        // empty-rescue на каждый кусок), чтобы и внутри хвоста была умная склейка.
+        if tail.count >= Int(AudioRecorder.targetSampleRate * 0.25), let pipe = pipeline {
+            let usePunctPrompt = settings.punctuationPrompt && !punctuationPromptTokens.isEmpty
             let t0 = Date()
-            let tailText = await transcribe(audio: tail)
+            for ch in Self.chunkBySilence(tail) {
+                let t = await decodeOneChunk(ch.samples, pipe: pipe, usePunctPrompt: usePunctPrompt)
+                if !t.isEmpty { items.append((t, ch.realPauseAfter)) }
+            }
             tailMs = Int(Date().timeIntervalSince(t0) * 1000)
-            if !tailText.isEmpty { pieces.append(tailText) }
         }
 
         streamPieces = []
@@ -289,7 +279,7 @@ final class Transcriber: ObservableObject {
         streamDecodeMs = 0
         streamingActive = false
 
-        let cleaned = Self.cleanup(stripHallucinationsUsingSettings(pieces.joined(separator: " ")))
+        let cleaned = Self.cleanup(stripHallucinationsUsingSettings(Self.joinChunkTexts(items)))
         // Total compute across eager chunks + tail, so the Dashboard RTF stays honest
         // (wall-time would understate it since eager work overlapped recording).
         lastProcessingMs = totalDecodeMs + tailMs
@@ -307,80 +297,72 @@ final class Transcriber: ObservableObject {
         streamCommittedOffset = 0
     }
 
-    /// One decode pass over the whole audio with a fixed `usePunctPrompt` flag.
-    /// Pre-chunks the audio (see `preChunk`) and decodes each chunk independently,
-    /// joining the non-empty pieces. Returns the cleaned, joined transcript.
+    /// One decode pass over the whole audio. Pre-chunks (see `chunkBySilence`), decodes
+    /// each chunk with empty-rescue retry, then smart-joins (false sentence breaks at
+    /// forced cuts removed). Returns the cleaned, joined transcript.
     private func runDecode(audio: [Float], pipe: WhisperKit, usePunctPrompt: Bool) async -> String {
-        let opts = DecodingOptions(
+        let chunks = Self.chunkBySilence(audio)
+        DebugLog.log("Transcribe: decode pass samples=\(audio.count), chunks=\(chunks.count), usePrompt=\(usePunctPrompt)")
+        var items: [(text: String, realPauseAfter: Bool)] = []
+        for (i, ch) in chunks.enumerated() {
+            let t = await decodeOneChunk(ch.samples, pipe: pipe, usePunctPrompt: usePunctPrompt)
+            DebugLog.log("Transcribe: chunk \(i + 1)/\(chunks.count) samples=\(ch.samples.count) → \(t.count) chars, realPauseAfter=\(ch.realPauseAfter)")
+            if !t.isEmpty { items.append((t, ch.realPauseAfter)) }
+        }
+        return Self.cleanup(stripHallucinationsUsingSettings(Self.joinChunkTexts(items)))
+    }
+
+    /// Decode a single ≤14 с chunk. Если обычный проход вернул ПУСТО (Whisper иногда
+    /// целиком отбрасывает кусок по no-speech/logProb-порогам, или punctuation-prompt
+    /// ломает декодер → мгновенный EOT), делаем один ретрай: prompt off + ВСЕ пороги
+    /// off. Это спасает настоящую речь, которая иначе терялась бы (обрыв хвоста).
+    private func decodeOneChunk(_ chunk: [Float], pipe: WhisperKit, usePunctPrompt: Bool) async -> String {
+        var text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(prompt: usePunctPrompt, looseThresholds: usePunctPrompt))
+        if text.isEmpty {
+            DebugLog.log("Transcribe: chunk empty → rescue retry (no prompt, thresholds off)")
+            text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(prompt: false, looseThresholds: true))
+        }
+        return text
+    }
+
+    private func rawDecode(_ chunk: [Float], pipe: WhisperKit, opts: DecodingOptions) async -> String {
+        do {
+            let results = try await pipe.transcribe(audioArray: chunk, decodeOptions: opts)
+            return results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            DebugLog.log("Transcribe: rawDecode FAILED — \(error.localizedDescription)")
+            return ""
+        }
+    }
+
+    /// Build decode options. `prompt` — подавать ли punctuation-prompt; `looseThresholds`
+    /// — выключить ли пороги отсева (нужно и с промптом, и в rescue-ретрае).
+    ///
+    /// `sampleLength: 224` — НЕ задирать выше: WhisperKit передаёт его как `maxTokenContext`
+    /// в MLMultiArray фикс. размера `Constants.maxTokenContext = 224`; выше → out-of-bounds
+    /// → SIGABRT. С `promptTokens` prefill-cache отключаем (`usePrefillCache: !prompt`) —
+    /// иначе декодер стартует с прошлого `prefilledCacheSize`. Пороги (compressionRatio/
+    /// logProb/firstTokenLogProb/noSpeech) при `looseThresholds` снимаем: длинный prompt
+    /// или сложный кусок иначе ложно уходят в fallback и возвращают пустоту.
+    private func makeOpts(prompt: Bool, looseThresholds: Bool) -> DecodingOptions {
+        DecodingOptions(
             verbose: false,
             task: .transcribe,
             language: settings.language,
             temperature: 0,
             temperatureFallbackCount: 3,
-            // ВНИМАНИЕ: НЕ задирать выше 224.
-            // WhisperKit передаёт `sampleLength` как `maxTokenContext` в
-            // `DecodingInputs.reset(...)`, который пишет в MLMultiArray фиксированного
-            // размера `Constants.maxTokenContext = 224`. При sampleLength > 224 идёт
-            // запись в индексы вне границ — SIGABRT в CoreML (`MLMultiArray
-            // setObject:atIndexedSubscript:`). Дефолт WhisperKit — 224, это и есть
-            // потолок для текущей архитектуры моделей.
             sampleLength: 224,
             usePrefillPrompt: true,
-            // Когда задан promptTokens, WhisperKit внутри пропускает загрузку
-            // prefill-cache (см. TextDecoder.swift:355, TODO в исходнике).
-            // Но при `usePrefillCache: true` все равно остаются полу-инициализированные
-            // структуры — `cacheLength[0]` остаётся равным prefilledCacheSize от
-            // последнего вызова, и главный цикл декодера стартует с этого индекса
-            // вместо `initialPrompt.count`. Поэтому явно отключаем cache, когда
-            // подаём промпт.
-            usePrefillCache: !usePunctPrompt,
+            usePrefillCache: !prompt,
             skipSpecialTokens: true,
             withoutTimestamps: true,
-            promptTokens: usePunctPrompt ? punctuationPromptTokens : nil,
+            promptTokens: prompt ? punctuationPromptTokens : nil,
             suppressBlank: false,
-            // Когда включён punctuationPrompt, ВСЕ пороги выключаем:
-            //   • compressionRatio / logProb / firstTokenLogProb — длинная
-            //     prefill-prompt-секция меняет распределение, дефолтные пороги
-            //     ложно срабатывают, уход в temperature-fallback и после 3 retry
-            //     возвращается пустая строка.
-            //   • noSpeechThreshold — это самый коварный: WhisperKit при
-            //     срабатывании НЕ делает retry, а молча помечает сегмент как
-            //     silence (см. Models.swift:388, `needsFallback: false`).
-            //     С промптом `noSpeechProb` стабильно держится выше 0.95 даже
-            //     на хорошей речи — отсюда тотально пустой результат.
-            // Без промпта пороги нужны (отсекают gibberish), оставляем дефолты.
-            compressionRatioThreshold: usePunctPrompt ? nil : 2.4,
-            logProbThreshold: usePunctPrompt ? nil : -1.0,
-            firstTokenLogProbThreshold: usePunctPrompt ? nil : -1.5,
-            noSpeechThreshold: usePunctPrompt ? nil : 0.95
-            // chunkingStrategy НЕ передаём: режем аудио сами в `preChunk(audio:)`
-            // ниже. Встроенный `.vad` не помогает — он не режет аудио ≤ 30 с вовсе
-            // и оставляет одну плотную фразу упираться в 223-токенный потолок
-            // декодера. Наш pre-chunk гарантирует, что каждый кусок ≤ 12 с.
+            compressionRatioThreshold: looseThresholds ? nil : 2.4,
+            logProbThreshold: looseThresholds ? nil : -1.0,
+            firstTokenLogProbThreshold: looseThresholds ? nil : -1.5,
+            noSpeechThreshold: looseThresholds ? nil : 0.95
         )
-
-        // Pre-chunk сами, до WhisperKit. Встроенный VAD-чанкер не режет аудио ≤ 30 с
-        // вовсе (AudioChunker.swift: `if audioArray.count <= maxChunkLength { return [single] }`),
-        // а декодер жёстко клипит `sampleLength` до `Constants.maxTokenContext - 1 = 223`
-        // (TextDecoder.swift: `loopCount = min(sampleLength, maxTokenContext - 1)`).
-        // Итог: одна плотная фраза 25-30 с упирается в 223 токена и обрывается на
-        // полуслове. Режем сами на куски ≤ 12 с по найденной тишине, каждый чанк
-        // отдельным вызовом transcribe(), результаты склеиваем.
-        let chunks = Self.preChunk(audio: audio)
-        DebugLog.log("Transcribe: decode pass samples=\(audio.count), chunks=\(chunks.count), usePrompt=\(usePunctPrompt)")
-        var pieces: [String] = []
-        for (i, chunk) in chunks.enumerated() {
-            do {
-                let results = try await pipe.transcribe(audioArray: chunk, decodeOptions: opts)
-                let text = results.map { $0.text }.joined(separator: " ")
-                DebugLog.log("Transcribe: chunk \(i+1)/\(chunks.count) samples=\(chunk.count) → \(text.count) chars")
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { pieces.append(trimmed) }
-            } catch {
-                DebugLog.log("Transcribe: chunk \(i+1)/\(chunks.count) FAILED — \(error.localizedDescription)")
-            }
-        }
-        return Self.cleanup(stripHallucinationsUsingSettings(pieces.joined(separator: " ")))
     }
 
     // MARK: - Pre-chunking
@@ -404,47 +386,142 @@ final class Transcriber: ObservableObject {
     /// Делит аудио на куски ≤ `maxChunkSamples`, стараясь резать по самой длинной
     /// тишине в окне `[target ± silenceSearchWindow]`. Если тишины нет — режет
     /// тупо по `maxChunkSamples` (хуже, но всё равно лучше потерянного хвоста).
-    private static func preChunk(audio: [Float]) -> [[Float]] {
-        if audio.count <= chunkCutoffSamples { return [audio] }
+    ///
+    /// Internal — переиспользуется ParakeetTranscriber: у Parakeet своя причина резать
+    /// (FluidAudio даёт пунктуацию/заглавные только на одном окне ≤ 15 с = 240_000
+    /// сэмплов; длиннее → скользящее окно без пунктуации). Наш максимум реза =
+    /// `maxChunkSamples`(12 с) + `silenceSearchWindow`(2 с) = 14 с < 15 с — безопасно
+    /// держит каждый кусок в «однооконном» пунктуационном пути обоих движков.
+    /// Один кусок аудио + признак того, что рез ПОСЛЕ него пришёлся на настоящую паузу
+    /// (≥ minSilenceFrames). На таком стыке движок ставит границу предложения корректно;
+    /// на вынужденном резе (`realPauseAfter == false`) точка/заглавная ложные — склейка
+    /// их уберёт (см. `joinChunkTexts`). Последний кусок всегда `realPauseAfter == true`.
+    struct AudioChunk { let samples: [Float]; let realPauseAfter: Bool }
+
+    static func chunkBySilence(_ audio: [Float]) -> [AudioChunk] {
+        if audio.count <= chunkCutoffSamples { return [AudioChunk(samples: audio, realPauseAfter: true)] }
         let vad = EnergyVAD()  // sampleRate=16000, frameLengthSamples=1600 (0.1 с)
-        var result: [[Float]] = []
+        var result: [AudioChunk] = []
         var cursor = 0
         while cursor < audio.count {
             let remaining = audio.count - cursor
             if remaining <= chunkCutoffSamples {
-                result.append(Array(audio[cursor..<audio.count]))
+                result.append(AudioChunk(samples: Array(audio[cursor..<audio.count]), realPauseAfter: true))
                 break
             }
-            let cutAt = findSilenceCut(in: audio, from: cursor, upTo: audio.count, vad: vad)
-            result.append(Array(audio[cursor..<cutAt]))
+            let (cutAt, realPause) = findSilenceCut(in: audio, from: cursor, upTo: audio.count, vad: vad)
+            result.append(AudioChunk(samples: Array(audio[cursor..<cutAt]), realPauseAfter: realPause))
             cursor = cutAt
         }
         return result
     }
 
     /// Находит точку реза для чанка, начинающегося на `from`: целится в
-    /// `from + maxChunkSamples` и сдвигает рез на середину самой длинной тишины в
-    /// окне `±silenceSearchWindow`. Если тишины нет — режет ровно по
-    /// `maxChunkSamples`. Гарантирует `from < cut <= limit`.
-    private static func findSilenceCut(in audio: [Float], from cursor: Int, upTo limit: Int, vad: EnergyVAD) -> Int {
+    /// `from + maxChunkSamples` и сдвигает рез в окне `±silenceSearchWindow`:
+    ///   1) если есть настоящая пауза (≥ minSilenceFrames) — режем по её середине,
+    ///      возвращаем `realPause = true` (граница предложения корректна);
+    ///   2) иначе — режем в САМОЙ ТИХОЙ точке окна (микропауза между словами), а не
+    ///      по слепому индексу `target`, и возвращаем `realPause = false` (рез внутри
+    ///      предложения — склейка потом уберёт ложную точку/заглавную).
+    /// Гарантирует `from < cut <= limit`.
+    static func findSilenceCut(in audio: [Float], from cursor: Int, upTo limit: Int, vad: EnergyVAD) -> (cut: Int, realPause: Bool) {
         let target = cursor + maxChunkSamples
         let searchStart = max(cursor + maxChunkSamples - silenceSearchWindowSamples, cursor + 1)
         let searchEnd = min(cursor + maxChunkSamples + silenceSearchWindowSamples, limit)
         var cutAt = target
+        var realPause = false
         if searchEnd > searchStart {
             let window = Array(audio[searchStart..<searchEnd])
             let vadResult = vad.voiceActivity(in: window)
             if let silence = vad.findLongestSilence(in: vadResult),
                silence.endIndex - silence.startIndex >= minSilenceFrames {
-                // Тишина достаточно длинная (≥ minSilenceFrames) → это настоящая
-                // граница. Режем по её середине — максимальный отступ от речи с
-                // обеих сторон. Слишком короткие провалы игнорируем (пауза внутри
-                // слова), оставляя рез на `target`.
+                // Настоящая пауза → режем по её середине (макс. отступ от речи).
                 let silenceMid = silence.startIndex + (silence.endIndex - silence.startIndex) / 2
                 cutAt = searchStart + vad.voiceActivityIndexToAudioSampleIndex(silenceMid)
+                realPause = true
+            } else {
+                // Сплошная речь без паузы → режем в самой тихой точке (стык слов/слогов),
+                // а не вслепую посреди слова.
+                cutAt = searchStart + lowestEnergyOffset(in: window)
             }
         }
-        return min(max(cutAt, cursor + 1), limit)
+        return (min(max(cutAt, cursor + 1), limit), realPause)
+    }
+
+    /// Возвращает offset (в сэмплах от начала `window`) центра кадра 0.1 с с
+    /// наименьшей энергией — самая тихая точка окна, лучший кандидат на рез, когда
+    /// явной паузы нет.
+    private static func lowestEnergyOffset(in window: [Float]) -> Int {
+        let frame = 1600                       // 0.1 с при 16 кГц
+        guard window.count > frame else { return window.count / 2 }
+        var minEnergy = Float.greatestFiniteMagnitude
+        var bestCenter = window.count / 2
+        var i = 0
+        while i < window.count {
+            let end = Swift.min(i + frame, window.count)
+            var sum: Float = 0
+            var j = i
+            while j < end { sum += window[j] * window[j]; j += 1 }
+            let energy = sum / Float(end - i)
+            if energy < minEnergy {
+                minEnergy = energy
+                bestCenter = i + (end - i) / 2
+            }
+            i += frame
+        }
+        return bestCenter
+    }
+
+    // MARK: - Smart join across chunk boundaries
+
+    /// Слова, которые обычно стоят со строчной буквы внутри предложения. Если кусок
+    /// после ВЫНУЖДЕННОГО реза начинается с такого слова с заглавной — это ложная
+    /// заглавная (движок принял стык за начало предложения), приводим к строчной.
+    /// Имена собственные сюда НЕ входят — их регистр не трогаем.
+    private static let lowercaseLeadWords: Set<String> = [
+        "и", "а", "но", "что", "чтобы", "потому", "поэтому", "для", "в", "во", "на", "с",
+        "со", "по", "к", "о", "об", "из", "от", "до", "при", "за", "под", "над", "это",
+        "как", "когда", "если", "то", "же", "бы", "ли", "или", "да", "тоже", "также",
+        "хотя", "пока", "раз", "ведь", "чем", "где", "куда", "откуда", "зато", "причем",
+        "который", "которая", "которое", "которые", "которых", "которым", "которой",
+        "которую", "которого", "котором", "которыми", "которому",
+        "его", "ее", "их", "там", "тут", "здесь", "потом", "затем", "значит", "поэтому",
+        "чтоб", "ну", "вот", "так",
+    ]
+
+    /// Склеивает куски с учётом флага `realPauseAfter`:
+    ///   • после НАСТОЯЩЕЙ паузы — оставляем как отдельные предложения (точка + заглавная);
+    ///   • после ВЫНУЖДЕННОГО реза (середина предложения) — убираем ложную точку у
+    ///     предыдущего куска и ложную заглавную у следующего (если это служебное слово),
+    ///     склеивая в одно предложение.
+    static func joinChunkTexts(_ items: [(text: String, realPauseAfter: Bool)]) -> String {
+        var out = ""
+        for (i, item) in items.enumerated() {
+            let t = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.isEmpty { continue }
+            if out.isEmpty { out = t; continue }
+            if items[i - 1].realPauseAfter {
+                out += " " + t                       // настоящая граница предложения
+            } else {
+                out = stripTrailingSentenceTerminator(out)
+                out += " " + lowercasedLeadIfFunction(t)
+            }
+        }
+        return out
+    }
+
+    private static func stripTrailingSentenceTerminator(_ s: String) -> String {
+        var t = s
+        while let last = t.last, last == "." || last == "…" { t.removeLast() }
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func lowercasedLeadIfFunction(_ s: String) -> String {
+        guard let first = s.first, first.isUppercase else { return s }
+        let word = String(s.prefix(while: { $0.isLetter }))
+            .lowercased().replacingOccurrences(of: "ё", with: "е")
+        guard lowercaseLeadWords.contains(word) else { return s }
+        return s.prefix(1).lowercased() + s.dropFirst()
     }
 
     static func cleanup(_ s: String) -> String {

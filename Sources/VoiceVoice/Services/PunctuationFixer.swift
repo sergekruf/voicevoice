@@ -20,8 +20,47 @@ import Foundation
 enum PunctuationFixer {
     static func fix(_ text: String) -> String {
         guard !text.isEmpty else { return text }
-        let sentences = splitSentencesPreservingTrailingSpace(text)
+        // Сначала «разжалуем» ложные точки перед связками-продолжениями (то есть,
+        // потому что, который…) — их ставят и модель, и стыки кусков на паузах.
+        let merged = mergeContinuations(text)
+        let sentences = splitSentencesPreservingTrailingSpace(merged)
         return sentences.map { fixSentence($0) }.joined()
+    }
+
+    // MARK: - False sentence-break demotion
+
+    /// Связки/подчинительные слова, которые НИКОГДА не начинают самостоятельное
+    /// предложение — это продолжение предыдущей мысли. Если перед ними стоит точка
+    /// (модель так решила, или стык кусков пришёлся на паузу), меняем «.» на «,» и
+    /// строчим первую букву: «…за 5 месяцев. То есть с января» → «…за 5 месяцев, то
+    /// есть с января». Набор НАМЕРЕННО консервативный — сюда НЕ входят «и/а/но/что»,
+    /// которые в речи вполне могут начинать предложение.
+    private static let continuationRegex: NSRegularExpression = {
+        let alts = [
+            "то\\s+есть", "то\\s+бишь", "потому\\s+что", "так\\s+как", "тогда\\s+как",
+            "поскольку", "чтобы", "котор(?:ый|ая|ое|ые|ых|ым|ой|ую|ого|ом|ыми|ому)",
+        ].joined(separator: "|")
+        // «.» или «…», пробелы, затем связка как отдельное слово.
+        return try! NSRegularExpression(
+            pattern: "([.…])\\s+(\(alts))(?=\\s|[,.!?…]|$)",
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static func mergeContinuations(_ text: String) -> String {
+        let ns = text as NSString
+        let matches = continuationRegex.matches(
+            in: text, options: [], range: NSRange(location: 0, length: ns.length)
+        )
+        guard !matches.isEmpty else { return text }
+        var result = text
+        // В обратном порядке, чтобы диапазоны из исходной строки не сдвигались.
+        for m in matches.reversed() {
+            let word = ns.substring(with: m.range(at: 2))
+            let replacement = ", " + word.lowercased()
+            result = (result as NSString).replacingCharacters(in: m.range, with: replacement)
+        }
+        return result
     }
 
     // MARK: - Per-sentence

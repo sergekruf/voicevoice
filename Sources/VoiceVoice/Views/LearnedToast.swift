@@ -2,6 +2,8 @@ import SwiftUI
 
 struct LearnedToast: View {
     let corrections: [(wrong: String, right: String)]
+    /// Called when the user taps «Отменить» — removes the just-learned pair(s).
+    var onUndo: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -38,6 +40,21 @@ struct LearnedToast: View {
                 }
             }
             Spacer(minLength: 0)
+            if let onUndo {
+                Button(action: onUndo) {
+                    Label("Отменить", systemImage: "arrow.uturn.backward")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.16))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Убрать эту правку из словаря")
+            }
         }
         .frame(maxWidth: 460, alignment: .leading)
         .padding(.horizontal, 14)

@@ -307,13 +307,62 @@ final class TextChangeWatcher {
         learnedKeys.insert(key)
     }
 
+    /// Частые служебные слова. Одиночную замену такого слова («в»→«на», «и»→«а»)
+    /// почти никогда не стоит учить — это либо смысловая правка, либо случайность.
+    private static let stopWords: Set<String> = [
+        "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все",
+        "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по",
+        "только", "ее", "мне", "было", "вот", "от", "меня", "о", "из", "ему", "теперь",
+        "или", "ни", "об", "до", "вас", "нас", "это", "это", "для", "ли",
+        "the", "a", "an", "of", "to", "in", "is", "it", "and", "or", "for",
+    ]
+
+    /// D — «умный фильтр захвата»: учим пару только если она похожа на ошибку
+    /// РАСПОЗНАВАНИЯ, а не на смысловую правку пользователя.
     private func isLearnable(wrong: String, right: String) -> Bool {
         let w = wrong.trimmingCharacters(in: .whitespacesAndNewlines)
         let r = right.trimmingCharacters(in: .whitespacesAndNewlines)
         if w.isEmpty || r.isEmpty { return false }
         if w.count < 2 || r.count < 2 { return false }
         if w.lowercased() == r.lowercased() { return false }
-        return true
+
+        // Длинные куски — почти всегда смысловой правок/перефраз, а не misrecognition.
+        let wWords = w.split(whereSeparator: { $0.isWhitespace }).count
+        let rWords = r.split(whereSeparator: { $0.isWhitespace }).count
+        if wWords > 4 || rWords > 4 { return false }
+        if w.count > 40 || r.count > 40 { return false }
+        // Сильно разное число слов = вставка/удаление контента, а не замена.
+        if abs(wWords - rWords) > 1 { return false }
+        // Одиночное стоп-слово как «было» — отсекаем («в»→«на»).
+        if wWords == 1, Self.stopWords.contains(w.lowercased().replacingOccurrences(of: "ё", with: "е")) {
+            return false
+        }
+        // Главный фильтр: похоже ли это на ошибку распознавания.
+        return looksLikeRecognitionFix(w, r)
+    }
+
+    /// Эвристика «это ошибка распознавания, а не перефраз»:
+    ///  • кросс-скрипт (рус слышим как англоязычный термин) — классический реальный
+    ///    кейс «клод код»→«Claude Code», для него Левенштейн неинформативен → разрешаем;
+    ///  • один скрипт — требуем близость по написанию (опечатка/оговорка), отсекаем
+    ///    далёкие замены вроде «хорошо»→«отлично».
+    private func looksLikeRecognitionFix(_ w: String, _ r: String) -> Bool {
+        let wl = w.lowercased().replacingOccurrences(of: "ё", with: "е")
+        let rl = r.lowercased().replacingOccurrences(of: "ё", with: "е")
+        let wCyr = Self.hasCyrillic(wl), rCyr = Self.hasCyrillic(rl)
+        let wLat = Self.hasLatin(wl), rLat = Self.hasLatin(rl)
+        if (wCyr && rLat && !rCyr) || (wLat && rCyr && !wCyr) { return true }
+        let dist = wl.levenshteinDistance(to: rl)
+        let maxLen = max(wl.count, rl.count)
+        guard maxLen > 0 else { return false }
+        return Double(dist) / Double(maxLen) <= 0.5
+    }
+
+    private static func hasCyrillic(_ s: String) -> Bool {
+        s.unicodeScalars.contains { $0.value >= 0x0400 && $0.value <= 0x04FF }
+    }
+    private static func hasLatin(_ s: String) -> Bool {
+        s.unicodeScalars.contains { ($0.value >= 0x41 && $0.value <= 0x5A) || ($0.value >= 0x61 && $0.value <= 0x7A) }
     }
 
     private func collapseSpaces(_ s: String) -> String {

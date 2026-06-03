@@ -74,8 +74,12 @@ final class ParakeetTranscriber: ObservableObject {
         ensureLoaded()
     }
 
-    /// Transcribe mono 16 kHz Float samples. Parakeet handles long audio natively, so
-    /// no pre-chunking — one call. Reuses the shared hallucination blocklist + cleanup.
+    /// Transcribe mono 16 kHz Float samples. Pre-chunks long audio into ≤14 с pieces on
+    /// silence: FluidAudio gives punctuation+capitalization only on a single window
+    /// ≤15 с (`maxModelSamples = 240_000`); beyond that it falls into a sliding-window
+    /// path that returns a lowercase, unpunctuated blob. Each chunk decoded with a fresh
+    /// decoder state → standalone punctuated sentence → joined. Short audio (≤13 с) is a
+    /// single call, unchanged. Reuses the shared hallucination blocklist + cleanup.
     func transcribe(audio: [Float]) async -> String {
         ensureLoaded()
         while true {
@@ -99,14 +103,25 @@ final class ParakeetTranscriber: ObservableObject {
 
         let start = Date()
         do {
-            // Language hint left nil: v3 auto-detects, and the hint is only a script
-            // filter. Can be wired from settings.language later if needed.
-            var decoderState = try TdtDecoderState()
-            let result = try await manager.transcribe(audio, decoderState: &decoderState, language: nil)
+            // ≤13 с → один кусок (быстрый путь без изменений). Длиннее → режем по тишине,
+            // каждый кусок остаётся в «однооконном» пунктуационном пути FluidAudio.
+            let chunks = Transcriber.chunkBySilence(audio)
+            var items: [(text: String, realPauseAfter: Bool)] = []
+            for (i, chunk) in chunks.enumerated() {
+                // Свежее decoder-состояние на каждый кусок → самостоятельная фраза с
+                // собственной пунктуацией и заглавной буквой.
+                var decoderState = try TdtDecoderState()
+                // Language hint nil: v3 auto-detects (hint — лишь скрипт-фильтр).
+                let result = try await manager.transcribe(chunk.samples, decoderState: &decoderState, language: nil)
+                let t = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                DebugLog.log("Parakeet: chunk \(i + 1)/\(chunks.count) samples=\(chunk.samples.count) → \(t.count) chars, realPauseAfter=\(chunk.realPauseAfter)")
+                if !t.isEmpty { items.append((t, chunk.realPauseAfter)) }
+            }
             lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
             let blocklist = Transcriber.parseBlocklist(settings.hallucinationBlocklist)
-            let cleaned = Transcriber.cleanup(Transcriber.stripHallucinations(result.text, sentenceBlocklist: blocklist))
-            DebugLog.log("Parakeet: done in \(lastProcessingMs)ms, len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
+            // Умная склейка: на вынужденных резах убираем ложную точку/заглавную.
+            let cleaned = Transcriber.cleanup(Transcriber.stripHallucinations(Transcriber.joinChunkTexts(items), sentenceBlocklist: blocklist))
+            DebugLog.log("Parakeet: done in \(lastProcessingMs)ms, chunks=\(chunks.count), len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
             return cleaned
         } catch {
             DebugLog.log("Parakeet: transcribe FAILED — \(error.localizedDescription)")

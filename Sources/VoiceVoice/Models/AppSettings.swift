@@ -107,6 +107,11 @@ final class AppSettings: ObservableObject {
     /// TextFormatter.swift for the full rule set. Off by default because it
     /// inserts newlines, which break single-line input fields.
     @AppStorage("autoFormat") var autoFormat: Bool = false
+    /// If true (default OFF, opt-in), restore punctuation + capitalization with the
+    /// on-device RUPunct neural model instead of the regex `PunctuationFixer`. Better
+    /// for Parakeet (which omits punctuation on long audio); loads a ~56 МБ Core ML
+    /// model on first use. Experimental.
+    @AppStorage("punctuationModel") var punctuationModel: Bool = false
     /// If true (default ON), post-process Whisper's sentence-final punctuation
     /// with simple Russian rules: «ли»-particle and question-word starts force
     /// `?`; long sentences without question markers ending in `?` get `.`. See

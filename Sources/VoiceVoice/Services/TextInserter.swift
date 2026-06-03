@@ -25,6 +25,13 @@ final class TextInserter {
     static let shared = TextInserter()
     private init() {}
 
+    /// Pending "grace period" clipboard restore for AX-unverifiable pastes. We can't tell
+    /// if ⌘V landed in Electron/CEF apps (Claude Desktop, MAX, Termius), so we leave the
+    /// dictation on the clipboard for `gracePeriodSeconds` (manual ⌘V works if it didn't
+    /// land), then restore the previous clipboard. Superseded by the next paste.
+    private var graceRestoreTask: Task<Void, Never>?
+    private let gracePeriodSeconds: UInt64 = 30
+
     /// Persistent ring buffer of the last N texts we have ever written to the clipboard
     /// (across app restarts). On the next paste cycle, if the clipboard's current primary
     /// string matches any of these, the content is OUR leftover — we capture an empty
@@ -104,6 +111,9 @@ final class TextInserter {
     }
 
     private func runPasteChain(text: String, bundleID: String) async -> PasteOutcome {
+        // A new paste supersedes any pending grace-period restore from the previous one.
+        graceRestoreTask?.cancel()
+        graceRestoreTask = nil
         let keepInClipboard = AppSettings.shared.alwaysKeepInClipboard
         let focusedElement = Self.copyFocusedElement()
         let editability = Self.classifyFocus(focusedElement)
@@ -153,14 +163,19 @@ final class TextInserter {
             // Edit & Learn button — auto-learn watcher physically can't track edits in
             // these apps, and this is the only way for the user to teach the dictionary.
             //
-            // Clipboard finalize is symmetric with the `.editable` branch:
-            //   • alwaysKeepInClipboard = true  → promote our transient write to a plain
-            //     entry so clipboard managers pick it up;
-            //   • alwaysKeepInClipboard = false → restore the saved snapshot, otherwise
-            //     the user's next ⌘V re-pastes the dictation (TransientType marker is
-            //     only respected by clipboard managers, not by the system pasteboard).
-            DebugLog.log("Paste: AX unverifiable — trusting tier1, no auto-learn possible (HUD with Edit & Learn)")
-            await finalizeAfterPaste(text: text, keepInClipboard: keepInClipboard, savedClipboard: savedClipboard)
+            // Clipboard handling — we CAN'T verify the paste, so:
+            //   • alwaysKeepInClipboard = true → promote to a plain entry, keep forever
+            //     (clipboard managers pick it up);
+            //   • else → GRACE PERIOD: leave our (transient-marked) dictation on the
+            //     clipboard so a manual ⌘V works if the field was unavailable, then after
+            //     `gracePeriodSeconds` restore the previous clipboard. This avoids both
+            //     losing the text (when paste failed) and permanently re-pasting it.
+            DebugLog.log("Paste: AX unverifiable — trusting tier1; grace-period clipboard (HUD with Edit & Learn)")
+            if keepInClipboard {
+                writePlainText(text)
+            } else {
+                scheduleGraceRestore(savedClipboard)
+            }
             return .pastedNoAutoLearn
         }
 
@@ -209,6 +224,20 @@ final class TextInserter {
     private func restoreClipboard(_ snapshot: ClipboardSnapshot) async {
         try? await Task.sleep(nanoseconds: 350_000_000)
         snapshot.restore()
+    }
+
+    /// Keep the just-pasted dictation on the clipboard for `gracePeriodSeconds` (so a
+    /// manual ⌘V recovers it if the paste didn't land in an AX-unverifiable app), then
+    /// restore the previous clipboard. Cancelled/superseded by the next paste.
+    private func scheduleGraceRestore(_ snapshot: ClipboardSnapshot) {
+        let seconds = gracePeriodSeconds
+        graceRestoreTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            if Task.isCancelled { return }
+            snapshot.restore()
+            DebugLog.log("Paste: grace period (\(seconds)s) elapsed — previous clipboard restored")
+            self?.graceRestoreTask = nil
+        }
     }
 
     enum Editability: CustomStringConvertible {

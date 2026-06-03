@@ -118,6 +118,19 @@ final class CorrectionStore {
         }
     }
 
+    /// Remove an auto-learned pair (used by the "Отменить" button on the learned-toast).
+    /// `wrong` is lowercased to match how the watcher stored it. Deletes across any
+    /// context. No-op if not present.
+    func removeLearned(wrong: String, right: String) {
+        let w = wrong.lowercased()
+        _ = try? db.write { db in
+            try CorrectionEntry
+                .filter(CorrectionEntry.Columns.wrong == w)
+                .filter(CorrectionEntry.Columns.right == right)
+                .deleteAll(db)
+        }
+    }
+
     func delete(_ entry: CorrectionEntry) {
         guard let id = entry.id else { return }
         _ = try? db.write { db in
