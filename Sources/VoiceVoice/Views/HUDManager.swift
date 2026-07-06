@@ -31,7 +31,9 @@ final class HUDManager {
         // shown even in quiet mode so the user always knows when recording is active.
         if centerOverlayPanel == nil {
             let host = NSHostingController(rootView: RecordingOverlay())
-            let panel = makePanel(size: NSSize(width: 120, height: 120), content: host.view)
+            // Wide enough for the live-preview text bubble; the visible content is
+            // bottom-aligned, the rest of the panel is transparent and click-through.
+            let panel = makePanel(size: RecordingOverlay.panelSize, content: host.view)
             panel.ignoresMouseEvents = true
             centerOverlayPanel = panel
         }

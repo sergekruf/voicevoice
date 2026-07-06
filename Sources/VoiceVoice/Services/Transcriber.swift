@@ -16,6 +16,10 @@ final class Transcriber: ObservableObject {
 
     @Published private(set) var state: ModelState = .notLoaded
     @Published private(set) var lastProcessingMs: Int = 0
+    /// Draft text of the current dictation, updated as eager-streaming chunks commit
+    /// (~every 12 s of speech). Shown live in the recording HUD; cleared by
+    /// AppController when the dictation finishes or is cancelled.
+    @Published private(set) var livePreviewText: String = ""
 
     private var pipeline: WhisperKit?
     private var loadingTask: Task<Void, Never>?
@@ -211,6 +215,7 @@ final class Transcriber: ObservableObject {
         streamCommittedOffset = 0
         streamDecodeMs = 0
         streamingActive = true
+        livePreviewText = ""
         let generation = streamGeneration
         DebugLog.log("Stream: started")
         streamTask = Task { [weak self] in
@@ -226,9 +231,25 @@ final class Transcriber: ObservableObject {
             guard case .ready = state, let pipe = pipeline else { continue }
 
             let snap = samples()
+            let fresh = snap.count - streamCommittedOffset
             // Only commit a chunk once a FULL chunk's worth of fresh audio exists, so
             // the trailing edge always has room to be cut on silence rather than mid-word.
-            guard snap.count - streamCommittedOffset >= Self.maxChunkSamples else { continue }
+            guard fresh >= Self.maxChunkSamples else {
+                // Полного чанка ещё нет — обновляем живой черновик передекодированием
+                // хвоста (turbo на ANE ≈ 0.1×RT, хвост ≤12 с — доли секунды). rawDecode
+                // БЕЗ rescue-ретрая: на тишине вернёт пусто, черновик просто не обновится.
+                if settings.livePreview, fresh >= Int(AudioRecorder.targetSampleRate * 0.8) {
+                    let tail = Array(snap[streamCommittedOffset..<snap.count])
+                    let text = await rawDecode(tail, pipe: pipe, opts: makeOpts(prompt: false, looseThresholds: false))
+                    guard generation == streamGeneration else { break }
+                    if !text.isEmpty {
+                        livePreviewText = stripHallucinationsUsingSettings(
+                            (streamPieces.map(\.text) + [text]).joined(separator: " ")
+                        )
+                    }
+                }
+                continue
+            }
 
             let (cut, realPause) = Self.findSilenceCut(in: snap, from: streamCommittedOffset, upTo: snap.count, vad: vad)
             guard cut > streamCommittedOffset else { continue }
@@ -250,6 +271,7 @@ final class Transcriber: ObservableObject {
             streamDecodeMs += Int(Date().timeIntervalSince(t0) * 1000)
             if !text.isEmpty { streamPieces.append((text, realPause)) }
             streamCommittedOffset = cut
+            livePreviewText = streamPieces.map(\.text).joined(separator: " ")
             DebugLog.log("Stream: committed chunk up to \(cut) (\(text.count) chars, realPause=\(realPause)), pieces=\(streamPieces.count)")
         }
     }
@@ -323,7 +345,11 @@ final class Transcriber: ObservableObject {
         streamTask = nil
         streamPieces = []
         streamCommittedOffset = 0
+        livePreviewText = ""
     }
+
+    /// Clear the live-preview draft (dictation finished or aborted).
+    func clearLivePreview() { livePreviewText = "" }
 
     /// One decode pass over the whole audio. Pre-chunks (see `chunkBySilence`), decodes
     /// each chunk with empty-rescue retry, then smart-joins (false sentence breaks at
@@ -530,7 +556,14 @@ final class Transcriber: ObservableObject {
             if t.isEmpty { continue }
             if out.isEmpty { out = t; continue }
             if items[i - 1].realPauseAfter {
-                out += " " + t                       // настоящая граница предложения
+                // Настоящая граница предложения. Движок иногда отдаёт следующий кусок
+                // со строчной («…твой текст. повторные коммиты…») — после терминатора
+                // поднимаем регистр первой буквы.
+                if let last = out.last, ".!?…".contains(last) {
+                    out += " " + uppercasedLead(t)
+                } else {
+                    out += " " + t
+                }
             } else {
                 out = stripTrailingSentenceTerminator(out)
                 out += " " + lowercasedLeadIfFunction(t)
@@ -543,6 +576,11 @@ final class Transcriber: ObservableObject {
         var t = s
         while let last = t.last, last == "." || last == "…" { t.removeLast() }
         return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func uppercasedLead(_ s: String) -> String {
+        guard let first = s.first, first.isLowercase else { return s }
+        return s.prefix(1).uppercased() + s.dropFirst()
     }
 
     private static func lowercasedLeadIfFunction(_ s: String) -> String {

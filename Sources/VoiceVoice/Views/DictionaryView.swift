@@ -40,8 +40,9 @@ struct DictionaryView: View {
                     Text("\(e.rejectedCount)").foregroundStyle(.red)
                 }.width(min: 30, max: 50)
                 TableColumn("Активно") { e in
-                    Image(systemName: e.isAutoApplied ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(e.isAutoApplied ? .green : .secondary)
+                    let active = e.isActive(minConfirmed: AppSettings.shared.minConfirmedToApply)
+                    Image(systemName: active ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(active ? .green : .secondary)
                 }.width(min: 50, max: 60)
             }
             HStack {

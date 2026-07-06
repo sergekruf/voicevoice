@@ -1,28 +1,75 @@
 import SwiftUI
 
 /// Large, centered, low-opacity recording animation. Borderless, click-through, click-protected,
-/// and stays on top of everything including fullscreen apps.
+/// and stays on top of everything including fullscreen apps. When live preview is on,
+/// a draft of the recognized text (fully on-device) floats above the indicator.
 struct RecordingOverlay: View {
     @ObservedObject private var controller = AppController.shared
+    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var transcriber = Transcriber.shared
+    @ObservedObject private var parakeet = ParakeetTranscriber.shared
+
+    static let panelSize = NSSize(width: 640, height: 240)
 
     var body: some View {
-        ZStack {
-            switch controller.state {
-            case .recording:
-                RecordingPulse(level: levelValue)
-            case .transcribing:
-                TranscribingSpinner()
-            default:
-                EmptyView()
+        VStack(spacing: 10) {
+            if showsIndicator && settings.livePreview && !previewText.isEmpty {
+                LivePreviewBubble(text: previewText)
             }
+            ZStack {
+                switch controller.state {
+                case .recording:
+                    RecordingPulse(level: levelValue)
+                case .transcribing:
+                    TranscribingSpinner()
+                default:
+                    EmptyView()
+                }
+            }
+            .frame(width: 120, height: 120)
         }
-        .frame(width: 120, height: 120)
+        .frame(width: Self.panelSize.width, height: Self.panelSize.height, alignment: .bottom)
         .background(Color.clear)
+    }
+
+    private var showsIndicator: Bool {
+        switch controller.state {
+        case .recording, .transcribing: return true
+        default: return false
+        }
+    }
+
+    /// Draft from whichever engine is active.
+    private var previewText: String {
+        settings.sttEngine == .parakeet ? parakeet.livePreviewText : transcriber.livePreviewText
     }
 
     private var levelValue: Float {
         if case .recording(let l) = controller.state { return l }
         return 0
+    }
+}
+
+/// Черновой распознанный текст: последние строки важнее — длинный текст
+/// обрезается СПЕРЕДИ (truncationMode .head).
+private struct LivePreviewBubble: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 14))
+            .foregroundStyle(.white.opacity(0.95))
+            .lineLimit(3)
+            .truncationMode(.head)
+            .multilineTextAlignment(.leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.black.opacity(0.78))
+            )
+            .frame(maxWidth: 600)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

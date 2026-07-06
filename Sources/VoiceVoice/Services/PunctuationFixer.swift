@@ -97,17 +97,22 @@ enum PunctuationFixer {
 
     // MARK: - Detectors
 
-    /// Проверка на свободно стоящую частицу «ли». Использует padding по краям,
-    /// чтобы lookbehind/lookahead работали и в начале/конце строки.
-    private static let liRegex = try! NSRegularExpression(
-        pattern: #"(?<=\s)ли(?=\s|[,.!?])"#, options: [.caseInsensitive]
-    )
+    /// Слова, после которых «ли» — часть утвердительного оборота, а не вопросительная
+    /// частица: «вряд ли», «едва ли», «навряд ли», «чуть ли (не)», «мало ли»,
+    /// «то ли… то ли…». Без этого списка «Он вряд ли успеет.» превращалось в вопрос.
+    private static let liIdiomPredecessors: Set<String> = [
+        "вряд", "едва", "навряд", "чуть", "мало", "то",
+    ]
 
+    /// Проверка на свободно стоящую вопросительную частицу «ли» (вне устойчивых
+    /// утвердительных оборотов).
     private static func containsLiParticle(_ s: String) -> Bool {
-        let padded = " " + s + " "
-        let ns = padded as NSString
-        return liRegex.firstMatch(in: padded, options: [],
-                                   range: NSRange(location: 0, length: ns.length)) != nil
+        let words = wordTokens(s)
+        for (i, w) in words.enumerated() where w == "ли" {
+            let prev = i > 0 ? words[i - 1] : ""
+            if !liIdiomPredecessors.contains(prev) { return true }
+        }
+        return false
     }
 
     /// Консервативный список вопросительных слов. Намеренно НЕ включает «как»,
@@ -123,14 +128,29 @@ enum PunctuationFixer {
         "а", "ну", "так", "и", "ой",
     ]
 
+    /// Неопределённые суффиксы: «что-то», «где-нибудь», «кто-либо» — дефис
+    /// токенизатор режет, поэтому проверяем следующее слово. Такие обороты
+    /// НЕ делают предложение вопросом («Что-то пошло не так.»).
+    private static let indefiniteSuffixes: Set<String> = ["то", "нибудь", "либо"]
+
+    /// Продолжения, при которых конкретное вопросительное слово — часть
+    /// декларативного оборота: «что касается…», «что ж…», «разве что…».
+    private static let nonQuestionFollowers: [String: Set<String>] = [
+        "что": ["касается", "ж", "же", "до", "бы", "б"],
+        "разве": ["что"],
+    ]
+
     private static func startsWithQuestionWord(_ s: String) -> Bool {
         var words = wordTokens(s)
         // Пропускаем дискурсивные маркеры в начале.
         while let first = words.first, discourseMarkers.contains(first) {
             words.removeFirst()
         }
-        guard let head = words.first else { return false }
-        return questionWords.contains(head)
+        guard let head = words.first, questionWords.contains(head) else { return false }
+        let next = words.count > 1 ? words[1] : ""
+        if indefiniteSuffixes.contains(next) { return false }
+        if nonQuestionFollowers[head]?.contains(next) == true { return false }
+        return true
     }
 
     /// Разбиение строки на «словесные» токены: только буквы/цифры, всё остальное

@@ -184,8 +184,17 @@ final class AppController: ObservableObject {
             // user keeps speaking, so on release only the trailing tail remains.
             // WhisperKit-only — Parakeet is fast enough and has no 223-token cap, so
             // it just transcribes the whole buffer on release.
-            if settings.eagerTranscription && settings.sttEngine == .whisperKit {
+            // Live preview also requires the streaming loop — it re-decodes the tail
+            // between chunk commits, so the draft updates every ~1-2 s regardless of
+            // the eager toggle (final output is identical either way: same cuts).
+            if (settings.eagerTranscription || settings.livePreview) && settings.sttEngine == .whisperKit {
                 transcriber.startStreaming(samples: { [weak self] in
+                    self?.recorder.currentSamples() ?? []
+                })
+            }
+            // Parakeet gets its own light preview loop (fast engine).
+            if settings.livePreview && settings.sttEngine == .parakeet {
+                ParakeetTranscriber.shared.startPreview(samples: { [weak self] in
                     self?.recorder.currentSamples() ?? []
                 })
             }
@@ -250,6 +259,9 @@ final class AppController: ObservableObject {
         state = .idle
         HUDManager.shared.hideRecording()
         hotkeys.resetPressState()   // keep the Caps Lock toggle in sync
+        Task { await ParakeetTranscriber.shared.stopPreview() }
+        transcriber.clearLivePreview()
+        ParakeetTranscriber.shared.clearLivePreview()
     }
 
     private func handleRelease() {
@@ -366,6 +378,8 @@ final class AppController: ObservableObject {
         lastPasteOutcome = .pending
         state = .complete
         HUDManager.shared.hideRecording()
+        transcriber.clearLivePreview()
+        ParakeetTranscriber.shared.clearLivePreview()
 
         if !appliedText.isEmpty {
             if settings.autoPaste {
@@ -386,7 +400,11 @@ final class AppController: ObservableObject {
                             HUDManager.shared.showResult(record: record)
                         }
                         if outcome == .pasted {
-                            TextChangeWatcher.shared.startWatching(pastedText: appliedText, frontBundleID: frontBundle)
+                            TextChangeWatcher.shared.startWatching(
+                                pastedText: appliedText,
+                                frontBundleID: frontBundle,
+                                appliedSubstitutions: self.lastSubstitutions
+                            )
                         }
                     }
                 }

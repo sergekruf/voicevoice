@@ -14,6 +14,13 @@ struct ClipboardSnapshot {
 
     static let empty = ClipboardSnapshot(primaryString: nil, items: [], wasEmpty: true)
 
+    /// Convention from http://nspasteboard.org — managers that respect it (Maccy, Paste,
+    /// Raycast, …) ignore writes carrying this type. A RESTORE is not a new copy: the
+    /// content was already recorded in the manager's history when the user originally
+    /// copied it; an unmarked restore write created a duplicate entry + a "copied" sound
+    /// every 30 s after each dictation in AX-unverifiable apps.
+    private static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+
     /// Capture the current clipboard. The caller is responsible for detecting "this is our
     /// leftover" and using `.empty` instead — see `TextInserter.isOursLeftover`.
     static func capture() -> ClipboardSnapshot {
@@ -50,6 +57,7 @@ struct ClipboardSnapshot {
                 for (type, data) in dict {
                     item.setData(data, forType: type)
                 }
+                item.setString("", forType: Self.transientType)
                 return item
             }
             let ok = pb.writeObjects(pbItems)
@@ -58,7 +66,10 @@ struct ClipboardSnapshot {
         }
         // Fallback: at least restore the primary string if we lost the items.
         if let s = primaryString {
-            pb.setString(s, forType: .string)
+            let item = NSPasteboardItem()
+            item.setString(s, forType: .string)
+            item.setString("", forType: Self.transientType)
+            pb.writeObjects([item])
             DebugLog.log("Clipboard: restore — string fallback ok, now=\(s.prefix(40))")
         } else {
             DebugLog.log("Clipboard: restore — no string and no items; cleared")

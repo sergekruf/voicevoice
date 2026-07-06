@@ -10,8 +10,11 @@ struct CorrectionEntry: Identifiable, Hashable, Codable {
     var createdAt: Date
     var lastUsedAt: Date
 
-    var isAutoApplied: Bool {
-        confirmedCount >= 2 && confirmedCount > rejectedCount * 2
+    /// Единый предикат «запись активна» (автоприменяется) — используется применением,
+    /// статистикой и бейджем в словаре. Раньше у трёх мест были три копии логики с
+    /// разными порогами (бейдж врал при minConfirmedToApply=1).
+    func isActive(minConfirmed: Int) -> Bool {
+        confirmedCount >= minConfirmed && confirmedCount > rejectedCount * 2
     }
 
     var netScore: Int {

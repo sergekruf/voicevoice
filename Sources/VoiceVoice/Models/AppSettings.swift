@@ -123,6 +123,10 @@ final class AppSettings: ObservableObject {
     /// silence-cut boundaries); this only changes WHEN chunks are decoded. Turn off
     /// to revert to "transcribe everything on release".
     @AppStorage("eagerTranscription") var eagerTranscription: Bool = true
+    /// Show draft recognized text above the recording indicator, live. Fully local:
+    /// fed by the same on-device engines (Parakeet: ~1.5 s tail re-decode; WhisperKit:
+    /// committed eager-streaming chunks).
+    @AppStorage("livePreview") var livePreview: Bool = true
     /// User-editable list of Whisper hallucination phrases (one per line) that get
     /// dropped from recognized text when they appear as a whole sentence. Seeded from
     /// `Transcriber.defaultHallucinationBlocklistText`. Technical kill-tokens

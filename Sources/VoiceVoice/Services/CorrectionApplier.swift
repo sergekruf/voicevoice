@@ -107,12 +107,18 @@ final class CorrectionApplier {
 
     // MARK: - Match strategies
 
-    /// Exact case-insensitive token-by-token match.
+    /// Exact case-insensitive token-by-token match. Between the phrase's words only
+    /// WHITESPACE is allowed: punctuation is a boundary — matching across it used to
+    /// swallow the separator («…клод. Код упал» → «…Claude Code упал», точка исчезала),
+    /// склеивая предложения.
     private func matchExact(_ pattern: [String], startingAt start: Int, in tokens: [Token]) -> Int? {
         var ti = start
         var pi = 0
         while pi < pattern.count {
-            while ti < tokens.count && !tokens[ti].isWord { ti += 1 }
+            while ti < tokens.count && !tokens[ti].isWord {
+                guard tokens[ti].text.allSatisfy({ $0.isWhitespace }) else { return nil }
+                ti += 1
+            }
             if ti >= tokens.count { return nil }
             if tokens[ti].text.lowercased() != pattern[pi] { return nil }
             ti += 1
@@ -123,12 +129,15 @@ final class CorrectionApplier {
 
     /// Fuzzy match: collect next N word tokens (where N = entry.wrongWords.count) from input,
     /// normalize, Levenshtein-compare to entry's normalized form. Match if ratio ≤ threshold.
+    /// Same boundary rule as matchExact: punctuation inside the window breaks the phrase.
     private func matchFuzzy(_ prep: PreparedEntry, startingAt start: Int, in tokens: [Token], threshold: Double) -> Int? {
         var collected: [String] = []
         var ti = start
         while collected.count < prep.wrongWords.count && ti < tokens.count {
             if tokens[ti].isWord {
                 collected.append(tokens[ti].text)
+            } else if !tokens[ti].text.allSatisfy({ $0.isWhitespace }) {
+                return nil
             }
             ti += 1
         }
@@ -152,6 +161,6 @@ final class CorrectionApplier {
     }
 
     private func shouldApply(_ entry: CorrectionEntry, minConfirmed: Int) -> Bool {
-        entry.confirmedCount >= minConfirmed && entry.confirmedCount > entry.rejectedCount * 2
+        entry.isActive(minConfirmed: minConfirmed)
     }
 }

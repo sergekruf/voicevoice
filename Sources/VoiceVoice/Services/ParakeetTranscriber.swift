@@ -20,12 +20,85 @@ final class ParakeetTranscriber: ObservableObject {
 
     @Published private(set) var state: Transcriber.ModelState = .notLoaded
     @Published private(set) var lastProcessingMs: Int = 0
+    /// Draft text of the current dictation, refreshed every ~1.5 s while recording
+    /// (committed silence-cut chunks decoded once + the live tail re-decoded each
+    /// tick — Parakeet on ANE is fast enough for that). Shown in the recording HUD.
+    @Published private(set) var livePreviewText: String = ""
 
     private var manager: AsrManager?
     private var loadingTask: Task<Void, Never>?
     private let settings = AppSettings.shared
 
+    // ── Live preview state ───────────────────────────────────────────────────
+    private var previewTask: Task<Void, Never>?
+    private var previewPieces: [String] = []
+    private var previewCommittedOffset = 0
+
     private init() {}
+
+    // MARK: - Live preview (during recording)
+
+    /// Start refreshing `livePreviewText` from the recorder's buffer snapshots.
+    /// No-op work while the model isn't ready (never blocks recording).
+    func startPreview(samples: @escaping () -> [Float]) {
+        previewTask?.cancel()
+        previewPieces = []
+        previewCommittedOffset = 0
+        livePreviewText = ""
+        previewTask = Task { [weak self] in await self?.previewLoop(samples: samples) }
+    }
+
+    /// Stop the preview loop and WAIT for an in-flight decode to finish — the final
+    /// transcription must not run concurrently with a preview decode on the same
+    /// AsrManager. Keeps the last draft on screen (cleared via clearLivePreview()).
+    func stopPreview() async {
+        previewTask?.cancel()
+        _ = await previewTask?.value
+        previewTask = nil
+    }
+
+    /// Clear the draft (dictation finished or aborted).
+    func clearLivePreview() { livePreviewText = "" }
+
+    private func previewLoop(samples: @escaping () -> [Float]) async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if Task.isCancelled { break }
+            guard case .ready = state, let manager else { continue }
+
+            let snap = samples()
+            guard snap.count - previewCommittedOffset >= Int(AudioRecorder.targetSampleRate * 0.6) else { continue }
+            let fresh = Array(snap[previewCommittedOffset...])
+            // Same silence-cut chunking as the final path: every chunk except the
+            // last is finished speech — decode once and commit; the last one is the
+            // live tail — re-decode it each tick (≤ one Parakeet window, fast).
+            let chunks = Transcriber.chunkBySilence(fresh)
+            guard !chunks.isEmpty else { continue }
+            for ch in chunks.dropLast() {
+                if Task.isCancelled { return }
+                let t = await previewDecode(ch.samples, manager: manager)
+                if !t.isEmpty { previewPieces.append(t) }
+                previewCommittedOffset += ch.samples.count
+            }
+            if Task.isCancelled { return }
+            let tailText = await previewDecode(chunks[chunks.count - 1].samples, manager: manager)
+            if Task.isCancelled { return }
+            let joined = (previewPieces + [tailText]).filter { !$0.isEmpty }.joined(separator: " ")
+            if !joined.isEmpty { livePreviewText = joined }
+        }
+    }
+
+    private func previewDecode(_ audio: [Float], manager: AsrManager) async -> String {
+        guard audio.count >= Int(AudioRecorder.targetSampleRate * 0.5) else { return "" }
+        do {
+            var decoderState = try TdtDecoderState()
+            let result = try await manager.transcribe(audio, decoderState: &decoderState, language: nil)
+            return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            DebugLog.log("Parakeet: preview decode failed — \(error.localizedDescription)")
+            return ""
+        }
+    }
 
     func ensureLoaded() {
         if case .ready = state { return }
@@ -81,6 +154,9 @@ final class ParakeetTranscriber: ObservableObject {
     /// decoder state → standalone punctuated sentence → joined. Short audio (≤13 с) is a
     /// single call, unchanged. Reuses the shared hallucination blocklist + cleanup.
     func transcribe(audio: [Float]) async -> String {
+        // The preview loop shares the AsrManager — make sure it's fully stopped
+        // before the final decode.
+        await stopPreview()
         ensureLoaded()
         while true {
             if Task.isCancelled { return "" }

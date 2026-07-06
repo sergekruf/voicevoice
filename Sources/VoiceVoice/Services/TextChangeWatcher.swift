@@ -32,6 +32,14 @@ final class TextChangeWatcher {
     private var lastEdited: String = ""
     /// Pairs we've already recorded this session — avoids duplicate toasts.
     private var learnedKeys: Set<String> = []
+    /// Substitutions the dictionary applied to THIS dictation — needed to recognise
+    /// a revert (user changed our substitution back) and penalise the entry instead
+    /// of learning a reverse pair («code → код»).
+    private var appliedSubs: [AppliedSubstitution] = []
+    /// Rejections already recorded this session — the cumulative diff re-commits the
+    /// same block after every stability window, without this the entry would be
+    /// penalised once per commit.
+    private var rejectedKeys: Set<String> = []
     /// Set to true on every observed value change. We hold off on learning until the value
     /// has been stable for `stableThresholdPolls` consecutive polls — that way we don't
     /// capture mid-typing intermediate junk like "кодоm" while the user is still editing.
@@ -60,7 +68,8 @@ final class TextChangeWatcher {
     private let pollInterval: TimeInterval = 1.0
     private let totalTimeout: TimeInterval = 300
 
-    func startWatching(pastedText: String, frontBundleID: String?) {
+    func startWatching(pastedText: String, frontBundleID: String?,
+                       appliedSubstitutions: [AppliedSubstitution] = []) {
         stopWatching()
 
         if !AppSettings.shared.autoLearnCorrections {
@@ -107,6 +116,8 @@ final class TextChangeWatcher {
         self.boundaryRetries = 0
         self.lastEdited = pastedText
         self.learnedKeys = []
+        self.appliedSubs = appliedSubstitutions
+        self.rejectedKeys = []
         self.inactivityDeadline = Date().addingTimeInterval(totalTimeout)
 
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -129,13 +140,17 @@ final class TextChangeWatcher {
     }
 
     func stopWatching() {
-        // Flush any pending edit before we tear the session down. Without this, edits made
-        // less than 6s before the user moves focus / sends the message are lost.
-        if pendingChanges, !lastEdited.isEmpty, !originalPasted.isEmpty {
+        // Flush any pending edit before we tear the session down — but ONLY if the
+        // value survived at least one stable poll (~1 s idle). Otherwise the user hit
+        // Enter / switched apps MID-TYPING, and we'd learn a truncated word
+        // («кодом → кодо») — the stability window exists precisely against that.
+        if pendingChanges, stablePollCount >= 1, !lastEdited.isEmpty, !originalPasted.isEmpty {
             DebugLog.log("Watcher: flushing pending diff before stopping")
             learnFromDiff(pasted: originalPasted, edited: lastEdited)
-            pendingChanges = false
+        } else if pendingChanges {
+            DebugLog.log("Watcher: dropping mid-typing pending diff (no stable poll)")
         }
+        pendingChanges = false
 
         pollTimer?.invalidate(); pollTimer = nil
         if let token = workspaceObserver {
@@ -149,6 +164,8 @@ final class TextChangeWatcher {
         boundaryRetries = 0
         lastEdited = ""
         learnedKeys.removeAll()
+        appliedSubs = []
+        rejectedKeys.removeAll()
         pendingChanges = false
         stablePollCount = 0
     }
@@ -299,6 +316,28 @@ final class TextChangeWatcher {
     }
 
     private func record(wrong: String, right: String, into learned: inout [(wrong: String, right: String)]) {
+        // Пользователь стёр/заменил то, что подставил СЛОВАРЬ (wrong == right одной из
+        // применённых замен) → это откат автозамены. Штрафуем исходную запись; обратную
+        // пару («code → код») НЕ учим — иначе в словаре заводятся противоборствующие
+        // записи, а плохая исходная продолжает жить.
+        if let sub = appliedSubs.first(where: { $0.right.lowercased() == wrong.lowercased() }) {
+            let rejKey = sub.wrong.lowercased() + "→" + sub.right.lowercased()
+            if !rejectedKeys.contains(rejKey) {
+                CorrectionStore.shared.recordRejection(wrong: sub.wrong, right: sub.right, contextBefore: sub.context)
+                rejectedKeys.insert(rejKey)
+                DebugLog.log("Watcher: auto-substitution reverted — penalised \(sub.wrong)→\(sub.right)")
+            }
+            // Чистый откат к исходному слову — новой пары нет.
+            if right.normalizedForFuzzy() == sub.wrong.normalizedForFuzzy() { return }
+            // Заменил на ТРЕТИЙ вариант — правильная пара: сырое слово → новый текст
+            // (wrong-стороной должно быть то, что реально приходит от движка).
+            recordPlain(wrong: sub.wrong, right: right, into: &learned)
+            return
+        }
+        recordPlain(wrong: wrong, right: right, into: &learned)
+    }
+
+    private func recordPlain(wrong: String, right: String, into learned: inout [(wrong: String, right: String)]) {
         guard isLearnable(wrong: wrong, right: right) else { return }
         let key = wrong.lowercased()
         if learnedKeys.contains(key) { return }
@@ -468,7 +507,10 @@ final class TextChangeWatcher {
 
     private static func computeBoundary(fullText: String, pasted: String) -> PasteBoundary? {
         guard !pasted.isEmpty else { return nil }
-        guard let range = fullText.range(of: pasted) else { return nil }
+        // ПОСЛЕДНЕЕ вхождение: вставка происходит у курсора (обычно в конце документа).
+        // Поиск первого вхождения путал регионы, когда та же фраза уже встречалась
+        // выше по тексту (повторная диктовка одинаковой фразы).
+        guard let range = fullText.range(of: pasted, options: .backwards) else { return nil }
         return PasteBoundary(
             prefix: String(fullText[..<range.lowerBound]),
             suffix: String(fullText[range.upperBound...])

@@ -31,7 +31,7 @@ final class CorrectionStore {
         for e in all {
             s.totalConfirmations += e.confirmedCount
             s.totalRejections += e.rejectedCount
-            if e.confirmedCount >= minConfirmedToApply && e.confirmedCount > e.rejectedCount * 2 {
+            if e.isActive(minConfirmed: minConfirmedToApply) {
                 s.activeEntries += 1
             }
         }
