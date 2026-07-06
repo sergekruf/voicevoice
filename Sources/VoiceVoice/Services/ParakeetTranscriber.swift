@@ -83,6 +83,7 @@ final class ParakeetTranscriber: ObservableObject {
     func transcribe(audio: [Float]) async -> String {
         ensureLoaded()
         while true {
+            if Task.isCancelled { return "" }
             switch state {
             case .ready: break
             case .error(let m): NSLog("VoiceVoice Parakeet error: \(m)"); return ""
@@ -102,12 +103,16 @@ final class ParakeetTranscriber: ObservableObject {
         }
 
         let start = Date()
-        do {
-            // ≤13 с → один кусок (быстрый путь без изменений). Длиннее → режем по тишине,
-            // каждый кусок остаётся в «однооконном» пунктуационном пути FluidAudio.
-            let chunks = Transcriber.chunkBySilence(audio)
-            var items: [(text: String, realPauseAfter: Bool)] = []
-            for (i, chunk) in chunks.enumerated() {
+        // ≤13 с → один кусок (быстрый путь без изменений). Длиннее → режем по тишине,
+        // каждый кусок остаётся в «однооконном» пунктуационном пути FluidAudio.
+        // do/catch — ВНУТРИ цикла: ошибка одного куска (сбой CoreML/ANE) не должна
+        // выбрасывать уже распознанные — для часового файла это потеря всего результата.
+        let chunks = Transcriber.chunkBySilence(audio)
+        var items: [(text: String, realPauseAfter: Bool)] = []
+        var failedChunks = 0
+        for (i, chunk) in chunks.enumerated() {
+            if Task.isCancelled { break }
+            do {
                 // Свежее decoder-состояние на каждый кусок → самостоятельная фраза с
                 // собственной пунктуацией и заглавной буквой.
                 var decoderState = try TdtDecoderState()
@@ -116,16 +121,16 @@ final class ParakeetTranscriber: ObservableObject {
                 let t = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 DebugLog.log("Parakeet: chunk \(i + 1)/\(chunks.count) samples=\(chunk.samples.count) → \(t.count) chars, realPauseAfter=\(chunk.realPauseAfter)")
                 if !t.isEmpty { items.append((t, chunk.realPauseAfter)) }
+            } catch {
+                failedChunks += 1
+                DebugLog.log("Parakeet: chunk \(i + 1)/\(chunks.count) FAILED — \(error.localizedDescription); keeping the rest")
             }
-            lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
-            let blocklist = Transcriber.parseBlocklist(settings.hallucinationBlocklist)
-            // Умная склейка: на вынужденных резах убираем ложную точку/заглавную.
-            let cleaned = Transcriber.cleanup(Transcriber.stripHallucinations(Transcriber.joinChunkTexts(items), sentenceBlocklist: blocklist))
-            DebugLog.log("Parakeet: done in \(lastProcessingMs)ms, chunks=\(chunks.count), len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
-            return cleaned
-        } catch {
-            DebugLog.log("Parakeet: transcribe FAILED — \(error.localizedDescription)")
-            return ""
         }
+        lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
+        let blocklist = Transcriber.parseBlocklist(settings.hallucinationBlocklist)
+        // Умная склейка: на вынужденных резах убираем ложную точку/заглавную.
+        let cleaned = Transcriber.cleanup(Transcriber.stripHallucinations(Transcriber.joinChunkTexts(items), sentenceBlocklist: blocklist))
+        DebugLog.log("Parakeet: done in \(lastProcessingMs)ms, chunks=\(chunks.count), failed=\(failedChunks), len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
+        return cleaned
     }
 }

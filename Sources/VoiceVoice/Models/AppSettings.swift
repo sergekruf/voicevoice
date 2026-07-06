@@ -12,7 +12,7 @@ enum HotkeyKind: String, CaseIterable, Identifiable {
         switch self {
         case .fn: return "Fn (удержание)"
         case .rightOption: return "Правый ⌥ Option (удержание)"
-        case .capsLock: return "Caps Lock (удержание)"
+        case .capsLock: return "Caps Lock (нажать — старт, нажать — стоп)"
         }
     }
 }

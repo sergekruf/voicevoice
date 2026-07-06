@@ -31,6 +31,11 @@ final class Transcriber: ObservableObject {
     private var streamPieces: [(text: String, realPauseAfter: Bool)] = []
     private var streamCommittedOffset: Int = 0
     private var streamingActive = false
+    /// Session generation. Bumped by startStreaming/cancelStreaming so an in-flight
+    /// chunk decode from a CANCELLED session can't commit its text/offset into the
+    /// next session after its `await` resumes. finishStreaming intentionally does
+    /// NOT bump it — there the in-flight chunk must still commit.
+    private var streamGeneration = 0
     /// Accumulated decode wall-time across all eager chunks of the current session,
     /// so `lastProcessingMs` reflects total compute (not just the tail) for the
     /// Dashboard's RTF stat.
@@ -152,8 +157,10 @@ final class Transcriber: ObservableObject {
     /// Transcribe an array of mono 16 kHz float32 samples in [-1, 1].
     func transcribe(audio: [Float]) async -> String {
         ensureLoaded()
-        // Wait until ready (or error). Keep this off main work.
+        // Wait until ready (or error / cancellation — Esc can abort a dictation
+        // stuck waiting on a model download). Keep this off main work.
         while true {
+            if Task.isCancelled { return "" }
             switch state {
             case .ready: break
             case .error(let msg):
@@ -204,15 +211,16 @@ final class Transcriber: ObservableObject {
         streamCommittedOffset = 0
         streamDecodeMs = 0
         streamingActive = true
+        let generation = streamGeneration
         DebugLog.log("Stream: started")
         streamTask = Task { [weak self] in
-            await self?.streamLoop(samples: samples)
+            await self?.streamLoop(samples: samples, generation: generation)
         }
     }
 
-    private func streamLoop(samples: @escaping () -> [Float]) async {
+    private func streamLoop(samples: @escaping () -> [Float], generation: Int) async {
         let vad = EnergyVAD()
-        while streamingActive && !Task.isCancelled {
+        while streamingActive && !Task.isCancelled && generation == streamGeneration {
             try? await Task.sleep(nanoseconds: 800_000_000)
             if !streamingActive || Task.isCancelled { break }
             guard case .ready = state, let pipe = pipeline else { continue }
@@ -233,6 +241,12 @@ final class Transcriber: ObservableObject {
             // decodeOneChunk includes the empty-rescue retry → eager chunks no longer
             // silently lose ~12 с of speech when Whisper returns empty.
             let text = await decodeOneChunk(chunk, pipe: pipe, usePunctPrompt: usePunctPrompt)
+            // The session may have been cancelled (Esc) — and even restarted — while
+            // the decode was in flight; `cut` is in the OLD buffer's coordinates.
+            guard generation == streamGeneration else {
+                DebugLog.log("Stream: dropping in-flight chunk of a cancelled session")
+                break
+            }
             streamDecodeMs += Int(Date().timeIntervalSince(t0) * 1000)
             if !text.isEmpty { streamPieces.append((text, realPause)) }
             streamCommittedOffset = cut
@@ -256,6 +270,18 @@ final class Transcriber: ObservableObject {
         _ = await streamTask?.value   // wait for the in-flight chunk to commit
         streamTask = nil
 
+        // Model never became ready during the session (lazy load still downloading /
+        // compiling): nothing was committed and the tail can't be decoded here. Fall
+        // back to the plain path, which WAITS for the model — otherwise the whole
+        // dictation would be silently lost.
+        guard pipeline != nil else {
+            DebugLog.log("Stream: model not ready at finish — falling back to full transcribe")
+            streamPieces = []
+            streamCommittedOffset = 0
+            streamDecodeMs = 0
+            return await transcribe(audio: finalSamples)
+        }
+
         var items = streamPieces
         let totalDecodeMs = streamDecodeMs
         let tailStart = min(streamCommittedOffset, finalSamples.count)
@@ -268,6 +294,7 @@ final class Transcriber: ObservableObject {
             let usePunctPrompt = settings.punctuationPrompt && !punctuationPromptTokens.isEmpty
             let t0 = Date()
             for ch in Self.chunkBySilence(tail) {
+                if Task.isCancelled { break }
                 let t = await decodeOneChunk(ch.samples, pipe: pipe, usePunctPrompt: usePunctPrompt)
                 if !t.isEmpty { items.append((t, ch.realPauseAfter)) }
             }
@@ -290,6 +317,7 @@ final class Transcriber: ObservableObject {
     /// Tear down any active streaming session without producing output (e.g. a new
     /// recording started before the previous finished).
     func cancelStreaming() {
+        streamGeneration += 1   // invalidate any in-flight chunk commit
         streamingActive = false
         streamTask?.cancel()
         streamTask = nil
@@ -305,6 +333,7 @@ final class Transcriber: ObservableObject {
         DebugLog.log("Transcribe: decode pass samples=\(audio.count), chunks=\(chunks.count), usePrompt=\(usePunctPrompt)")
         var items: [(text: String, realPauseAfter: Bool)] = []
         for (i, ch) in chunks.enumerated() {
+            if Task.isCancelled { break }
             let t = await decodeOneChunk(ch.samples, pipe: pipe, usePunctPrompt: usePunctPrompt)
             DebugLog.log("Transcribe: chunk \(i + 1)/\(chunks.count) samples=\(ch.samples.count) → \(t.count) chars, realPauseAfter=\(ch.realPauseAfter)")
             if !t.isEmpty { items.append((t, ch.realPauseAfter)) }

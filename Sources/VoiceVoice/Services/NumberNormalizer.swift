@@ -49,6 +49,13 @@ enum NumberNormalizer {
     /// Lone forms of «1» we deliberately DON'T digitize — almost always article-like.
     private static let oneFormsToSkipAlone: Set<String> = ["один", "одна", "одно", "одну"]
 
+    /// Scale forms that MAY stand for «1×scale» with no numeral before them:
+    /// «миллион рублей» = 1 000 000. Plural/genitive forms («тысячи людей»,
+    /// «миллионов») without a numeral are plain prose, never a quantity.
+    private static let implicitOneScaleForms: Set<String> = [
+        "тысяча", "тысячу", "миллион", "миллиард", "триллион",
+    ]
+
     private static func convertNumbers(_ text: String) -> String {
         let tokens = Tokenizer.tokenize(text)
         var output = ""
@@ -68,6 +75,11 @@ enum NumberNormalizer {
     /// Walk forward consuming digit-tokens, cardinal-word tokens, scale-word tokens, and
     /// whitespace between them. Returns the resolved integer + the index AFTER the last
     /// consumed number-token, or nil if the run holds no numbers (or is a lone «один»).
+    ///
+    /// Adjacent numbers are merged ONLY in valid Russian cardinal order (hundreds →
+    /// tens → units): «сто двадцать один» → 121, but «один два три» stays three
+    /// separate numbers and «1 425 689» is left for `collapseThousandsSpaces` —
+    /// blind summing turned those into 6 and 1115.
     private static func parseNumberRun(tokens: [Token], startIdx: Int) -> (value: String, endIdx: Int)? {
         var i = startIdx
         var total = 0          // accumulated value of completed scales (… тысяч, миллионов)
@@ -75,23 +87,45 @@ enum NumberNormalizer {
         var count = 0          // number-tokens consumed
         var lastConsumedIdx = startIdx - 1
         var firstWord: String? = nil
+        // Value of the last cardinal WORD merged into `current`; nil after a digit
+        // token or a scale word. Gates composition order.
+        var lastCardinal: Int? = nil
+        // A digit token («425») is already a complete number — only a scale word
+        // may follow it («1 миллион»), never another digit/cardinal to sum with.
+        var lastWasDigits = false
 
         while i < tokens.count {
             let token = tokens[i]
             let lower = token.text.lowercased().replacingOccurrences(of: "ё", with: "е")
 
-            if token.isWord, let digit = Int(token.text) {
-                current += digit
+            if token.isWord, let digits = Int(token.text) {
+                if current != 0 || lastWasDigits { break }   // «1 425» / «двадцать 5» — separate numbers
+                current = digits
+                lastWasDigits = true
+                lastCardinal = nil
                 count += 1; lastConsumedIdx = i; i += 1
                 if firstWord == nil { firstWord = lower }
             } else if token.isWord, let v = numberWords[lower] {
+                if lastWasDigits { break }                    // «25 пять» — separate numbers
+                if let prev = lastCardinal {
+                    // Valid composition only: hundreds (100…900) may be followed by
+                    // anything below a hundred; tens (20…90) — by units (1…9).
+                    let composes = (prev >= 100 && v < 100) || (prev >= 20 && prev <= 90 && 1...9 ~= v)
+                    if !composes { break }                    // «один два три» — separate numbers
+                }
                 current += v
+                lastCardinal = v
                 count += 1; lastConsumedIdx = i; i += 1
                 if firstWord == nil { firstWord = lower }
             } else if token.isWord, let scale = scaleWords[lower] {
+                // Without a numeral before it, only «тысяча/миллион/…» (sing. nom./acc.)
+                // means a quantity; «тысячи людей», «миллионов» — plain prose.
+                if current == 0 && !implicitOneScaleForms.contains(lower) { break }
                 if current == 0 { current = 1 }   // «миллион» alone = 1_000_000
                 total += current * scale
                 current = 0
+                lastCardinal = nil
+                lastWasDigits = false
                 count += 1; lastConsumedIdx = i; i += 1
                 if firstWord == nil { firstWord = lower }
             } else if count >= 1 && !token.isWord && token.text.allSatisfy({ $0.isWhitespace }) {

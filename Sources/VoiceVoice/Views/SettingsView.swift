@@ -136,8 +136,8 @@ struct SettingsView: View {
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Text("Hotkey (удержание)")
-                        HelpHint(text: "Клавиша, удержание которой запускает запись и распознавание. Fn — стандарт macOS. Right Option / Right Cmd — альтернативы, если Fn уже занят другим приложением или системой.")
+                        Text("Hotkey")
+                        HelpHint(text: "Клавиша диктовки. Fn и Right Option работают удержанием (зажал — говоришь — отпустил). Caps Lock — переключателем: нажал — запись пошла, нажал ещё раз — стоп (macOS не сообщает отпускание Caps Lock, поэтому удержание для него невозможно; сам замок при этом не включается).")
                     }
                 }
                 Toggle(isOn: $settings.autoPaste) {

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/sergekruf/voicevoice)](https://github.com/sergekruf/voicevoice/releases/latest)
-[![Platform: macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://www.apple.com/macos/)
+[![Platform: macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](https://www.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-orange?logo=apple)](#требования)
 [![Downloads](https://img.shields.io/github/downloads/sergekruf/voicevoice/total?label=downloads)](https://github.com/sergekruf/voicevoice/releases)
 
@@ -28,7 +28,7 @@
 
 ## Требования
 
-- macOS **13 Ventura** или новее (рекомендуется 14+)
+- macOS **14 Sonoma** или новее
 - Apple Silicon (M1 / M2 / M3 / M4 / M5) — на Intel-Mac'ах Whisper падает на CPU и работает в 5–10 раз медленнее, интерактивная диктовка непрактична
 - Xcode 15+ (только для сборки из исходников)
 - Микрофон + разрешение Accessibility (запросит при первом запуске)

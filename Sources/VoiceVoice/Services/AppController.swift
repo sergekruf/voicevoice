@@ -32,10 +32,15 @@ final class AppController: ObservableObject {
     private var transcriberObserver: AnyCancellable?
     private var parakeetObserver: AnyCancellable?
 
-    // Transient Esc-to-cancel monitors, installed only while recording.
+    // Transient Esc-to-cancel monitors, installed from recording start until the
+    // transcription finishes (Esc aborts either phase).
     private var escMonitorGlobal: Any?
     private var escMonitorLocal: Any?
     private static let escKeyCode = 53
+
+    /// In-flight decode of the released dictation — cancellable by Esc while the
+    /// model is still transcribing (or even still downloading/loading).
+    private var transcribeTask: Task<Void, Never>?
 
     private init() {
         recorder.onLevel = { [weak self] level in
@@ -155,7 +160,14 @@ final class AppController: ObservableObject {
 
     private func handlePress() {
         DebugLog.log("App: handlePress entered, state=\(state)")
-        guard case .idle = state else { return }
+        // .error must not be a dead end: the next press simply retries (the cause —
+        // e.g. an unplugged mic — may be gone by now). .complete is a purely
+        // cosmetic 0.5s tail — a press during it used to swallow the entire next
+        // dictation in fast back-to-back use.
+        switch state {
+        case .idle, .error, .complete: break
+        default: return
+        }
         guard AVAuthStatus.audio == .authorized else {
             recorder.requestPermissionIfNeeded { _ in }
             return
@@ -179,6 +191,12 @@ final class AppController: ObservableObject {
             }
         } catch {
             state = .error(error.localizedDescription)
+            hotkeys.resetPressState()   // keep the Caps Lock toggle in sync
+            // Auto-recover: without this the state machine had no way out of .error
+            // and the hotkey stayed dead until app restart.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                if case .error = self?.state { self?.state = .idle }
+            }
         }
     }
 
@@ -211,16 +229,27 @@ final class AppController: ObservableObject {
         escMonitorLocal = nil
     }
 
-    /// Abort the current dictation without transcribing or pasting. Triggered by Esc
-    /// while recording — protects the focused field from accidental/garbled input.
+    /// Abort the current dictation without pasting. Triggered by Esc while recording
+    /// (drops the audio) or while transcribing (drops the in-flight decode — matters
+    /// when the model is still downloading and the app would otherwise hang in
+    /// .transcribing with no way out).
     func cancelDictation() {
-        guard case .recording = state else { return }
-        DebugLog.log("App: dictation cancelled via Esc")
+        switch state {
+        case .recording:
+            DebugLog.log("App: dictation cancelled via Esc")
+            recorder.cancel()
+            transcriber.cancelStreaming()
+        case .transcribing:
+            DebugLog.log("App: transcription cancelled via Esc")
+            transcribeTask?.cancel()
+            transcribeTask = nil
+        default:
+            return
+        }
         removeEscMonitor()
-        recorder.cancel()
-        transcriber.cancelStreaming()
         state = .idle
         HUDManager.shared.hideRecording()
+        hotkeys.resetPressState()   // keep the Caps Lock toggle in sync
     }
 
     private func handleRelease() {
@@ -228,7 +257,8 @@ final class AppController: ObservableObject {
             DebugLog.log("App: handleRelease bailing, state was \(state)")
             return
         }
-        removeEscMonitor()
+        // Esc monitors intentionally stay installed: Esc can also cancel the
+        // transcription phase (see cancelDictation). Removed when finalize runs.
         let samples = recorder.stop()
         let duration = Double(samples.count) / AudioRecorder.targetSampleRate
         // RMS / peak of the captured buffer — confirms the mic actually picked up sound.
@@ -246,7 +276,7 @@ final class AppController: ObservableObject {
         state = .transcribing
         HUDManager.shared.showTranscribing()
 
-        Task { [weak self] in
+        transcribeTask = Task { [weak self] in
             guard let self else { return }
             // Route to the active engine. WhisperKit: finishStreaming finishes an
             // in-flight eager session (decodes only the trailing tail + joins committed
@@ -264,7 +294,15 @@ final class AppController: ObservableObject {
             if self.settings.punctuationModel {
                 rawText = await RUPunctService.shared.punctuate(rawText)
             }
+            // Esc during transcription cancels this task — drop the result instead
+            // of pasting into whatever field happens to be focused by now.
+            if Task.isCancelled {
+                DebugLog.log("App: transcription was cancelled — dropping result")
+                return
+            }
             await MainActor.run {
+                self.removeEscMonitor()
+                self.transcribeTask = nil
                 let procMs = self.settings.sttEngine == .parakeet
                     ? ParakeetTranscriber.shared.lastProcessingMs
                     : self.transcriber.lastProcessingMs

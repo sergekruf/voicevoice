@@ -40,5 +40,9 @@ TODO.md
 # ML-инструменты конвертации (torch venv, модели) — не коммитить
 .mltools/
 
-# RUPunct-модель пунктуации — бандлится в .app, но НЕ в git (большая); локально для сборки
-Sources/VoiceVoice/Resources/RUPunct/
+# RUPunct: сама Core ML модель (~56 МБ) — НЕ в git; лёгкие файлы (токенизатор,
+# labels, README) коммитятся, чтобы свежий клон собирался: Package.swift объявляет
+# папку ресурсом, и без неё swift build падает. Без модели приложение работает,
+# нейро-пунктуация просто недоступна (RUPunctService деградирует в .failed).
+Sources/VoiceVoice/Resources/RUPunct/RUPunct_small.mlpackage/
+Sources/VoiceVoice/Resources/RUPunct/*.mlmodelc/

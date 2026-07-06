@@ -30,6 +30,11 @@ final class TextInserter {
     /// dictation on the clipboard for `gracePeriodSeconds` (manual ⌘V works if it didn't
     /// land), then restore the previous clipboard. Superseded by the next paste.
     private var graceRestoreTask: Task<Void, Never>?
+    /// Snapshot the pending grace restore would re-apply. Kept separately so the next
+    /// paste, when it supersedes the task, can carry the user's ORIGINAL clipboard
+    /// forward instead of dropping it (otherwise dictation №2 inside the grace window
+    /// lost the pre-dictation clipboard forever).
+    private var pendingGraceSnapshot: ClipboardSnapshot?
     private let gracePeriodSeconds: UInt64 = 30
 
     /// Persistent ring buffer of the last N texts we have ever written to the clipboard
@@ -112,8 +117,12 @@ final class TextInserter {
 
     private func runPasteChain(text: String, bundleID: String) async -> PasteOutcome {
         // A new paste supersedes any pending grace-period restore from the previous one.
+        // Its snapshot (the user's clipboard from BEFORE that dictation) is adopted
+        // below if the clipboard still holds our leftover.
         graceRestoreTask?.cancel()
         graceRestoreTask = nil
+        let carriedSnapshot = pendingGraceSnapshot
+        pendingGraceSnapshot = nil
         let keepInClipboard = AppSettings.shared.alwaysKeepInClipboard
         let focusedElement = Self.copyFocusedElement()
         let editability = Self.classifyFocus(focusedElement)
@@ -133,8 +142,15 @@ final class TextInserter {
         let currentClipboard = NSPasteboard.general.string(forType: .string)
         let savedClipboard: ClipboardSnapshot
         if isOursLeftover(currentClipboard) {
-            DebugLog.log("Clipboard: current content is our leftover — will clear after paste")
-            savedClipboard = .empty
+            if let carried = carriedSnapshot {
+                // The leftover came from a paste whose grace restore never fired —
+                // its snapshot IS the user's real clipboard. Restore that one later.
+                DebugLog.log("Clipboard: our leftover + pending snapshot — carrying the original clipboard forward")
+                savedClipboard = carried
+            } else {
+                DebugLog.log("Clipboard: current content is our leftover — will clear after paste")
+                savedClipboard = .empty
+            }
         } else {
             savedClipboard = ClipboardSnapshot.capture()
         }
@@ -174,7 +190,7 @@ final class TextInserter {
             if keepInClipboard {
                 writePlainText(text)
             } else {
-                scheduleGraceRestore(savedClipboard)
+                scheduleGraceRestore(savedClipboard, ourText: text)
             }
             return .pastedNoAutoLearn
         }
@@ -228,14 +244,22 @@ final class TextInserter {
 
     /// Keep the just-pasted dictation on the clipboard for `gracePeriodSeconds` (so a
     /// manual ⌘V recovers it if the paste didn't land in an AX-unverifiable app), then
-    /// restore the previous clipboard. Cancelled/superseded by the next paste.
-    private func scheduleGraceRestore(_ snapshot: ClipboardSnapshot) {
+    /// restore the previous clipboard — but only if the clipboard STILL holds our
+    /// dictation: anything the user copied themselves during the window wins.
+    /// Cancelled/superseded by the next paste.
+    private func scheduleGraceRestore(_ snapshot: ClipboardSnapshot, ourText: String) {
         let seconds = gracePeriodSeconds
+        pendingGraceSnapshot = snapshot
         graceRestoreTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             if Task.isCancelled { return }
-            snapshot.restore()
-            DebugLog.log("Paste: grace period (\(seconds)s) elapsed — previous clipboard restored")
+            if NSPasteboard.general.string(forType: .string) == ourText {
+                snapshot.restore()
+                DebugLog.log("Paste: grace period (\(seconds)s) elapsed — previous clipboard restored")
+            } else {
+                DebugLog.log("Paste: grace period elapsed — clipboard was changed by the user, leaving it alone")
+            }
+            self?.pendingGraceSnapshot = nil
             self?.graceRestoreTask = nil
         }
     }
@@ -485,13 +509,18 @@ final class TextInserter {
         let element = focusedRef as! AXUIElement
 
         // Cap chunk size — Electron has a known crash at >2040 chars. Even though we
-        // skip Electron explicitly, native Cocoa text views can be slow with huge strings.
-        let chunk = String(text.prefix(2000))
-
-        let setErr = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, chunk as CFString)
-        if setErr != .success {
-            DebugLog.log("Paste tier3: AXUIElementSetAttributeValue err=\(setErr.rawValue)")
-            return false
+        // skip Electron explicitly, native Cocoa text views can be slow with huge
+        // strings. Insert in chunks (each set replaces the collapsed selection, so
+        // consecutive writes append) — a single prefix(2000) silently dropped the tail.
+        var remaining = Substring(text)
+        while !remaining.isEmpty {
+            let chunk = String(remaining.prefix(2000))
+            let setErr = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, chunk as CFString)
+            if setErr != .success {
+                DebugLog.log("Paste tier3: AXUIElementSetAttributeValue err=\(setErr.rawValue) after \(text.count - remaining.count)/\(text.count) chars")
+                return false
+            }
+            remaining = remaining.dropFirst(chunk.count)
         }
         return true
     }

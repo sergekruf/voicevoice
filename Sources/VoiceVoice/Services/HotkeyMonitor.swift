@@ -67,6 +67,12 @@ final class HotkeyMonitor {
         } else {
             DebugLog.log("Hotkey: global flagsChanged monitor ACTIVE")
         }
+
+        // Toggle mode starts from a known state: lock off, no phantom "first press
+        // turns caps off and gets ignored".
+        if hotkey == .capsLock {
+            Self.setSystemCapsLock(on: false)
+        }
     }
 
     func stop() {
@@ -100,10 +106,35 @@ final class HotkeyMonitor {
                 updateState(down: flags.contains(.option))
             }
         case .capsLock:
-            if keyCode == 57 {
-                updateState(down: flags.contains(.capsLock))
+            // flagsChanged для Caps Lock отражает состояние ЗАМКА, а не физической
+            // клавиши — key-up не детектится, поэтому «удержание» невозможно.
+            // Режим — переключатель: нажатие = старт, следующее нажатие = стоп.
+            // Реагируем только на включение замка (наш программный сброс ниже даёт
+            // событие с выключенным флагом — оно игнорируется, петля исключена) и
+            // сразу гасим замок, чтобы пользователь не остался печатать капсом.
+            if keyCode == 57 && flags.contains(.capsLock) {
+                Self.setSystemCapsLock(on: false)
+                updateState(down: !isDown)
             }
         }
+    }
+
+    /// Sync the virtual press state after a dictation ends outside the normal
+    /// release path (Esc cancel, failed recorder start). Critical for the Caps Lock
+    /// toggle mode, where `isDown` isn't tied to any physical key state.
+    func resetPressState() { isDown = false }
+
+    /// Force the system Caps Lock LOCK state via the IOHIDSystem user client.
+    /// Used by the Caps Lock hotkey mode so dictation presses don't leave the
+    /// user's keyboard in caps.
+    private static func setSystemCapsLock(on: Bool) {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(kIOHIDSystemClass))
+        guard service != 0 else { return }
+        defer { IOObjectRelease(service) }
+        var connect: io_connect_t = 0
+        guard IOServiceOpen(service, mach_task_self_, UInt32(kIOHIDParamConnectType), &connect) == KERN_SUCCESS else { return }
+        defer { IOServiceClose(connect) }
+        IOHIDSetModifierLockState(connect, Int32(kIOHIDCapsLockState), on)
     }
 
     private func updateState(down: Bool) {

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/sergekruf/voicevoice)](https://github.com/sergekruf/voicevoice/releases/latest)
-[![Platform: macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://www.apple.com/macos/)
+[![Platform: macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](https://www.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-orange?logo=apple)](#requirements)
 [![Downloads](https://img.shields.io/github/downloads/sergekruf/voicevoice/total?label=downloads)](https://github.com/sergekruf/voicevoice/releases)
 
@@ -29,7 +29,7 @@ Landing: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) · Pre-built
 
 ## Requirements
 
-- macOS **13 Ventura** or newer (14+ recommended)
+- macOS **14 Sonoma** or newer
 - Apple Silicon (M1 / M2 / M3 / M4 / M5) — on Intel Macs Whisper falls back to CPU and runs 5–10× slower, making interactive dictation impractical
 - Xcode 15+ (only if building from source)
 - Microphone + Accessibility permissions (requested on first launch)
