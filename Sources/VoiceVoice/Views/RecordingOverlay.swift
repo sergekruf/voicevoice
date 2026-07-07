@@ -14,7 +14,7 @@ struct RecordingOverlay: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            if showsIndicator && settings.livePreview && !previewText.isEmpty {
+            if showsIndicator && !previewText.isEmpty {
                 LivePreviewBubble(text: previewText)
             }
             ZStack {

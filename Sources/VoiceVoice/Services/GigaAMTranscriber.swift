@@ -330,9 +330,51 @@ final class GigaAMTranscriber: ObservableObject {
             }
             prev = best
         }
-        return pieces.joined()
-            .replacingOccurrences(of: "▁", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.stripUnitTails(
+            pieces.joined()
+                .replacingOccurrences(of: "▁", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    // MARK: - Unit-symbol artifacts
+
+    /// Встроенная нормализация GigaAM иногда «смешивает» символ и хвост исходного
+    /// слова: «двадцать три градуса» → «23°дуса» (greedy-CTC интерливит две
+    /// конкурирующие записи — «23°» и «23 градуса»). Убираем кириллический хвост
+    /// после символа единицы, если он — суффикс соответствующего слова (≥2 букв).
+    private static let unitTailWords: [Character: [String]] = [
+        "°": ["градус", "градуса", "градусов", "градусах", "градусам"],
+        "%": ["процент", "процента", "процентов", "процентах", "процентам"],
+        "№": ["номер", "номера", "номеров"],
+        "$": ["доллар", "доллара", "долларов", "долларах"],
+        "€": ["евро"],
+        "₽": ["рубль", "рубля", "рублей", "рублях", "рублям"],
+    ]
+
+    static func stripUnitTails(_ s: String) -> String {
+        var result = ""
+        var i = s.startIndex
+        while i < s.endIndex {
+            let ch = s[i]
+            result.append(ch)
+            i = s.index(after: i)
+            guard let words = unitTailWords[ch] else { continue }
+            // Хвост: опционально один пробел, дальше подряд идущие кириллические буквы.
+            var j = i
+            if j < s.endIndex, s[j] == " " { j = s.index(after: j) }
+            var tail = ""
+            while j < s.endIndex, let sc = s[j].unicodeScalars.first,
+                  (0x0400...0x04FF).contains(sc.value) {
+                tail.append(s[j])
+                j = s.index(after: j)
+            }
+            if tail.count >= 2, words.contains(where: { $0.hasSuffix(tail.lowercased()) }) {
+                DebugLog.log("GigaAM: dropped unit tail «\(ch)\(tail)» → «\(ch)»")
+                i = j
+            }
+        }
+        return result
     }
 
     // MARK: - Live preview (как у Parakeet)

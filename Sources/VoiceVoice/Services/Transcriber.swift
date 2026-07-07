@@ -23,9 +23,6 @@ final class Transcriber: ObservableObject {
 
     private var pipeline: WhisperKit?
     private var loadingTask: Task<Void, Never>?
-    /// Cached tokens of a punctuation-rich Russian prompt, used to bias the model
-    /// toward producing punctuation. Computed once per model load.
-    private var punctuationPromptTokens: [Int] = []
 
     // ── Eager streaming state ────────────────────────────────────────────────
     // While recording, we transcribe completed VAD chunks in the background so
@@ -47,20 +44,6 @@ final class Transcriber: ObservableObject {
 
     private let settings = AppSettings.shared
 
-    /// Punctuation-rich seed. Whisper uses `promptTokens` as "previous context",
-    /// which biases it to match the style — including reliably emitting commas,
-    /// periods, question and exclamation marks for Russian. Particularly important
-    /// for 4-bit quantized models, where punctuation is often dropped.
-    ///
-    /// КОРОТКИЙ намеренно: длинная "previous context" (>50 токенов) рушит
-    /// first-token-log-prob и avgLogProb на коротких пользовательских фразах,
-    /// декодер уходит в temperature-fallback, после 3 retry возвращается пустой
-    /// результат. Здесь ~25 токенов с разнообразной пунктуацией.
-    private let punctuationPromptText = """
-    Привет, друзья! Как ваши дела? Всё хорошо — спасибо. \
-    Получаем точную транскрипцию с пунктуацией.
-    """
-
     private init() {}
 
     func ensureLoaded() {
@@ -79,14 +62,6 @@ final class Transcriber: ObservableObject {
             let pipe = try await buildPipeline(modelName: modelName, repo: repo)
             DebugLog.log("Transcriber: WhisperKit() returned successfully")
             self.pipeline = pipe
-
-            if let tokenizer = pipe.tokenizer {
-                let encoded = tokenizer.encode(text: " " + self.punctuationPromptText)
-                self.punctuationPromptTokens = encoded.filter { $0 < 50_000 }
-                DebugLog.log("Transcriber: punctuation prompt tokens=\(self.punctuationPromptTokens.count)")
-            } else {
-                DebugLog.log("Transcriber: tokenizer is nil (no punctuation prompt available)")
-            }
 
             self.state = .ready
             settings.lastSuccessfulLoadAt = Date().timeIntervalSince1970
@@ -187,11 +162,8 @@ final class Transcriber: ObservableObject {
         }
 
         let start = Date()
-        let usePunctPrompt = settings.punctuationPrompt && !punctuationPromptTokens.isEmpty
-        // Пустые куски (включая случай, когда punctuation-prompt ломает декодер) спасает
-        // per-chunk rescue-ретрай внутри `decodeOneChunk` — отдельный whole-audio fallback
-        // больше не нужен.
-        let cleaned = await runDecode(audio: audio, pipe: pipe, usePunctPrompt: usePunctPrompt)
+        // Пустые куски спасает per-chunk rescue-ретрай внутри `decodeOneChunk`.
+        let cleaned = await runDecode(audio: audio, pipe: pipe)
         lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
         DebugLog.log("Transcribe: done in \(lastProcessingMs)ms, len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
         return cleaned
@@ -238,9 +210,9 @@ final class Transcriber: ObservableObject {
                 // Полного чанка ещё нет — обновляем живой черновик передекодированием
                 // хвоста (turbo на ANE ≈ 0.1×RT, хвост ≤12 с — доли секунды). rawDecode
                 // БЕЗ rescue-ретрая: на тишине вернёт пусто, черновик просто не обновится.
-                if settings.livePreview, fresh >= Int(AudioRecorder.targetSampleRate * 0.8) {
+                if fresh >= Int(AudioRecorder.targetSampleRate * 0.8) {
                     let tail = Array(snap[streamCommittedOffset..<snap.count])
-                    let text = await rawDecode(tail, pipe: pipe, opts: makeOpts(prompt: false, looseThresholds: false))
+                    let text = await rawDecode(tail, pipe: pipe, opts: makeOpts(looseThresholds: false))
                     guard generation == streamGeneration else { break }
                     if !text.isEmpty {
                         livePreviewText = stripHallucinationsUsingSettings(
@@ -254,14 +226,11 @@ final class Transcriber: ObservableObject {
             let (cut, realPause) = Self.findSilenceCut(in: snap, from: streamCommittedOffset, upTo: snap.count, vad: vad)
             guard cut > streamCommittedOffset else { continue }
 
-            // Recompute per-iteration so the prompt is picked up once tokens populate
-            // (they're computed on model load, which may finish after streaming starts).
-            let usePunctPrompt = settings.punctuationPrompt && !punctuationPromptTokens.isEmpty
             let chunk = Array(snap[streamCommittedOffset..<cut])
             let t0 = Date()
             // decodeOneChunk includes the empty-rescue retry → eager chunks no longer
             // silently lose ~12 с of speech when Whisper returns empty.
-            let text = await decodeOneChunk(chunk, pipe: pipe, usePunctPrompt: usePunctPrompt)
+            let text = await decodeOneChunk(chunk, pipe: pipe)
             // Отпускание клавиши посреди декода: finishStreaming отменяет задачу,
             // WhisperKit бросает CancellationError, текст приходит ПУСТЫМ. Коммитить
             // смещение нельзя — иначе хвост в finishStreaming пропустит этот кусок и
@@ -322,11 +291,10 @@ final class Transcriber: ObservableObject {
         // Tail может быть длиннее одного куска → чанкуем его так же (с флагами пауз +
         // empty-rescue на каждый кусок), чтобы и внутри хвоста была умная склейка.
         if tail.count >= Int(AudioRecorder.targetSampleRate * 0.25), let pipe = pipeline {
-            let usePunctPrompt = settings.punctuationPrompt && !punctuationPromptTokens.isEmpty
             let t0 = Date()
             for ch in Self.chunkBySilence(tail) {
                 if Task.isCancelled { break }
-                let t = await decodeOneChunk(ch.samples, pipe: pipe, usePunctPrompt: usePunctPrompt)
+                let t = await decodeOneChunk(ch.samples, pipe: pipe)
                 if !t.isEmpty { items.append((t, ch.realPauseAfter)) }
             }
             tailMs = Int(Date().timeIntervalSince(t0) * 1000)
@@ -363,13 +331,13 @@ final class Transcriber: ObservableObject {
     /// One decode pass over the whole audio. Pre-chunks (see `chunkBySilence`), decodes
     /// each chunk with empty-rescue retry, then smart-joins (false sentence breaks at
     /// forced cuts removed). Returns the cleaned, joined transcript.
-    private func runDecode(audio: [Float], pipe: WhisperKit, usePunctPrompt: Bool) async -> String {
+    private func runDecode(audio: [Float], pipe: WhisperKit) async -> String {
         let chunks = Self.chunkBySilence(audio)
-        DebugLog.log("Transcribe: decode pass samples=\(audio.count), chunks=\(chunks.count), usePrompt=\(usePunctPrompt)")
+        DebugLog.log("Transcribe: decode pass samples=\(audio.count), chunks=\(chunks.count)")
         var items: [(text: String, realPauseAfter: Bool)] = []
         for (i, ch) in chunks.enumerated() {
             if Task.isCancelled { break }
-            let t = await decodeOneChunk(ch.samples, pipe: pipe, usePunctPrompt: usePunctPrompt)
+            let t = await decodeOneChunk(ch.samples, pipe: pipe)
             DebugLog.log("Transcribe: chunk \(i + 1)/\(chunks.count) samples=\(ch.samples.count) → \(t.count) chars, realPauseAfter=\(ch.realPauseAfter)")
             if !t.isEmpty { items.append((t, ch.realPauseAfter)) }
         }
@@ -377,14 +345,13 @@ final class Transcriber: ObservableObject {
     }
 
     /// Decode a single ≤14 с chunk. Если обычный проход вернул ПУСТО (Whisper иногда
-    /// целиком отбрасывает кусок по no-speech/logProb-порогам, или punctuation-prompt
-    /// ломает декодер → мгновенный EOT), делаем один ретрай: prompt off + ВСЕ пороги
-    /// off. Это спасает настоящую речь, которая иначе терялась бы (обрыв хвоста).
-    private func decodeOneChunk(_ chunk: [Float], pipe: WhisperKit, usePunctPrompt: Bool) async -> String {
-        var text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(prompt: usePunctPrompt, looseThresholds: usePunctPrompt))
+    /// целиком отбрасывает кусок по no-speech/logProb-порогам), делаем один ретрай
+    /// со снятыми порогами — спасает настоящую речь, которая иначе терялась бы.
+    private func decodeOneChunk(_ chunk: [Float], pipe: WhisperKit) async -> String {
+        var text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(looseThresholds: false))
         if text.isEmpty {
-            DebugLog.log("Transcribe: chunk empty → rescue retry (no prompt, thresholds off)")
-            text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(prompt: false, looseThresholds: true))
+            DebugLog.log("Transcribe: chunk empty → rescue retry (thresholds off)")
+            text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(looseThresholds: true))
         }
         return text
     }
@@ -399,16 +366,14 @@ final class Transcriber: ObservableObject {
         }
     }
 
-    /// Build decode options. `prompt` — подавать ли punctuation-prompt; `looseThresholds`
-    /// — выключить ли пороги отсева (нужно и с промптом, и в rescue-ретрае).
+    /// Build decode options. `looseThresholds` — выключить пороги отсева (rescue-ретрай).
     ///
     /// `sampleLength: 224` — НЕ задирать выше: WhisperKit передаёт его как `maxTokenContext`
     /// в MLMultiArray фикс. размера `Constants.maxTokenContext = 224`; выше → out-of-bounds
-    /// → SIGABRT. С `promptTokens` prefill-cache отключаем (`usePrefillCache: !prompt`) —
-    /// иначе декодер стартует с прошлого `prefilledCacheSize`. Пороги (compressionRatio/
-    /// logProb/firstTokenLogProb/noSpeech) при `looseThresholds` снимаем: длинный prompt
-    /// или сложный кусок иначе ложно уходят в fallback и возвращают пустоту.
-    private func makeOpts(prompt: Bool, looseThresholds: Bool) -> DecodingOptions {
+    /// → SIGABRT. Пороги (compressionRatio/logProb/firstTokenLogProb/noSpeech) при
+    /// `looseThresholds` снимаем: сложный кусок иначе ложно уходит в fallback и
+    /// возвращает пустоту.
+    private func makeOpts(looseThresholds: Bool) -> DecodingOptions {
         DecodingOptions(
             verbose: false,
             task: .transcribe,
@@ -419,10 +384,9 @@ final class Transcriber: ObservableObject {
             temperatureFallbackCount: 3,
             sampleLength: 224,
             usePrefillPrompt: true,
-            usePrefillCache: !prompt,
+            usePrefillCache: true,
             skipSpecialTokens: true,
             withoutTimestamps: true,
-            promptTokens: prompt ? punctuationPromptTokens : nil,
             suppressBlank: false,
             compressionRatioThreshold: looseThresholds ? nil : 2.4,
             logProbThreshold: looseThresholds ? nil : -1.0,
@@ -623,11 +587,10 @@ final class Transcriber: ObservableObject {
     /// слой. Сравнение пословное по ЦЕЛОМУ предложению (а не подстроке), чтобы не
     /// съесть настоящую речь. Новые артефакты можно добавлять сюда из логов.
     ///
-    /// Дефолтный редактируемый список фраз-галлюцинаций (одна на строку). Пользователь
-    /// может править его в Настройках (`AppSettings.hallucinationBlocklist`); на старте
-    /// `AppStorage` берёт именно это значение. Технические kill-токены (DimaTorzok и
-    /// т.п.) живут отдельно в `hallucinationSubstrings` и не редактируются.
-    static let defaultHallucinationBlocklistText = """
+    /// Встроенный список фраз-«титров» (одна на строку). Редактор в настройках убран
+    /// как невостребованный — новые артефакты добавляются сюда из логов. Технические
+    /// kill-токены (DimaTorzok и т.п.) живут отдельно в `hallucinationSubstrings`.
+    nonisolated static let defaultHallucinationBlocklistText = """
     Продолжение следует
     Спасибо за просмотр
     Подписывайтесь на канал
@@ -635,8 +598,11 @@ final class Transcriber: ObservableObject {
     Ставьте лайки и подписывайтесь
     """
 
+    /// Распаршенный дефолтный блоклист (единожды).
+    nonisolated static let defaultBlocklist: Set<String> = parseBlocklist(defaultHallucinationBlocklistText)
+
     /// Парсит многострочный список в нормализованное множество для сравнения.
-    static func parseBlocklist(_ raw: String) -> Set<String> {
+    nonisolated static func parseBlocklist(_ raw: String) -> Set<String> {
         var set = Set<String>()
         for line in raw.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
             let norm = normalizeForBlocklist(String(line))
@@ -686,10 +652,10 @@ final class Transcriber: ObservableObject {
 
     /// Instance wrapper: pulls the user-editable phrase list from settings and strips.
     private func stripHallucinationsUsingSettings(_ text: String) -> String {
-        Self.stripHallucinations(text, sentenceBlocklist: Self.parseBlocklist(settings.hallucinationBlocklist))
+        Self.stripHallucinations(text, sentenceBlocklist: Self.defaultBlocklist)
     }
 
-    private static func normalizeForBlocklist(_ s: String) -> String {
+    nonisolated private static func normalizeForBlocklist(_ s: String) -> String {
         var n = s.lowercased().replacingOccurrences(of: "ё", with: "е")
         n = n.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r.,!?…—–-«»\"'()"))
         while n.contains("  ") { n = n.replacingOccurrences(of: "  ", with: " ") }

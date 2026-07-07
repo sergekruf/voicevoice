@@ -71,13 +71,9 @@ final class AppSettings: ObservableObject {
     /// whatever they already selected — this default only applies to fresh installs.
     @AppStorage("sttEngine") var sttEngineRaw: String = STTEngine.parakeet.rawValue
     @AppStorage("hotkey") var hotkeyRaw: String = HotkeyKind.fn.rawValue
-    @AppStorage("autoPaste") var autoPaste: Bool = true
-    @AppStorage("alwaysKeepInClipboard") var alwaysKeepInClipboard: Bool = false
-    @AppStorage("showResultHUD") var showResultHUD: Bool = true
     @AppStorage("language") var language: String = "ru"
     @AppStorage("onboardingDone") var onboardingDone: Bool = false
     @AppStorage("minConfirmedToApply") var minConfirmedToApply: Int = 1
-    @AppStorage("punctuationPrompt") var punctuationPrompt: Bool = false
     /// Whether the dictionary applies fuzzy phrase matching (Levenshtein on normalized text).
     @AppStorage("fuzzyMatching") var fuzzyMatching: Bool = true
     /// Maximum allowed Levenshtein-distance / max-length ratio for a fuzzy match (0..1).
@@ -86,9 +82,6 @@ final class AppSettings: ObservableObject {
     @AppStorage("totalSubstitutions") var totalSubstitutions: Int = 0
     /// Of those, how many were fuzzy matches.
     @AppStorage("fuzzySubstitutions") var fuzzySubstitutions: Int = 0
-    /// If true, the model is loaded at app launch (instant first Fn press, slower startup).
-    /// If false (default), the model loads lazily on first interaction.
-    @AppStorage("eagerLoad") var eagerLoad: Bool = false
     /// Unix timestamp of the last time WhisperKit finished `load()` successfully. Used by
     /// the Dashboard to communicate whether the *next* load will be quick (ANE-warm) or slow.
     @AppStorage("lastSuccessfulLoadAt") var lastSuccessfulLoadAt: Double = 0
@@ -103,15 +96,6 @@ final class AppSettings: ObservableObject {
     /// If true (default), after a verified paste we monitor the focused field for ~5 min
     /// and learn user edits into the dictionary as wrong→right corrections.
     @AppStorage("autoLearnCorrections") var autoLearnCorrections: Bool = true
-    /// If true (default off), appends a context-appropriate emoji to the recognized text
-    /// when a known trigger phrase is present (хаха → 😄, спасибо → 🙏, поздравляю → 🎉…).
-    @AppStorage("autoEmoji") var autoEmoji: Bool = false
-    /// If true (default OFF, opt-in), recognized speech is auto-formatted into
-    /// markdown-ish lists: «первое… второе… третье…» → numbered list,
-    /// «список покупок: a, b, c, d» → bullets, «новый абзац» → \n\n. See
-    /// TextFormatter.swift for the full rule set. Off by default because it
-    /// inserts newlines, which break single-line input fields.
-    @AppStorage("autoFormat") var autoFormat: Bool = false
     /// If true (default OFF, opt-in), restore punctuation + capitalization with the
     /// on-device RUPunct neural model instead of the regex `PunctuationFixer`. Better
     /// for Parakeet (which omits punctuation on long audio); loads a ~56 МБ Core ML
@@ -127,20 +111,12 @@ final class AppSettings: ObservableObject {
     /// long dictations feel near-instant. Output is identical to batch mode (same
     /// silence-cut boundaries); this only changes WHEN chunks are decoded. Turn off
     /// to revert to "transcribe everything on release".
-    @AppStorage("eagerTranscription") var eagerTranscription: Bool = true
-    /// Show draft recognized text above the recording indicator, live. Fully local:
-    /// fed by the same on-device engines (Parakeet: ~1.5 s tail re-decode; WhisperKit:
-    /// committed eager-streaming chunks).
-    @AppStorage("livePreview") var livePreview: Bool = true
-    /// User-editable list of Whisper hallucination phrases (one per line) that get
-    /// dropped from recognized text when they appear as a whole sentence. Seeded from
-    /// `Transcriber.defaultHallucinationBlocklistText`. Technical kill-tokens
-    /// (DimaTorzok etc.) are handled separately in code and not exposed here.
-    @AppStorage("hallucinationBlocklist") var hallucinationBlocklist: String = Transcriber.defaultHallucinationBlocklistText
+    /// Приглушать системный звук (музыку/видео) на время записи, чтобы он не
+    /// попадал в микрофон. Состояние вывода восстанавливается на отпускании клавиши.
+    @AppStorage("muteSystemAudioOnRecord") var muteSystemAudioOnRecord: Bool = false
     /// Master switch — when true, ALL HUDs / toasts / overlays are suppressed:
     /// recording mic, result HUD, learned-correction toast, ready toast, model-loading
-    /// indicator. Useful for screencasts, presentations, focused work. Overrides the
-    /// finer-grained `showResultHUD` toggle.
+    /// indicator. Useful for screencasts, presentations, focused work.
     @AppStorage("quietMode") var quietMode: Bool = false
 
     // ── Lifetime stats (incremented on every dictation, never trimmed). ─────────

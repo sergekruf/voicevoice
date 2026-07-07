@@ -8,7 +8,7 @@ enum PasteOutcome: Equatable {
     case pastedNoAutoLearn   // tier 1 was trusted in an AX-unreadable app; auto-learn watcher CAN'T run → surface HUD with manual Edit & Learn
     case clipboardOnly       // no editable field — text dropped into clipboard, hint shown
     case failed              // editable field, but all paste tiers couldn't deliver — text in clipboard
-    case skipped             // autoPaste disabled or empty text
+    case skipped             // empty text — nothing to paste
 }
 
 /// Three-tier paste strategy. Each tier covers a TCC failure mode of the previous one.
@@ -82,22 +82,16 @@ final class TextInserter {
     }
 
     /// Write `text` as a normal pasteboard string (no markers). Used when we *want*
-    /// clipboard managers to capture the entry — i.e., when `alwaysKeepInClipboard` is on
-    /// or all paste tiers failed and the user needs to ⌘V manually later.
+    /// clipboard managers to capture the entry — вставить некуда (нет поля) или все
+    /// тиры провалились и пользователю нужен ручной ⌘V.
     private func writePlainText(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    /// Common post-paste step on any successful tier: either rewind to the previous
-    /// clipboard (default) or promote our transient write to a plain entry so clipboard
-    /// managers pick it up (when `alwaysKeepInClipboard` is on).
-    private func finalizeAfterPaste(text: String, keepInClipboard: Bool, savedClipboard: ClipboardSnapshot) async {
-        if keepInClipboard {
-            writePlainText(text)
-        } else {
-            await restoreClipboard(savedClipboard)
-        }
+    /// Common post-paste step on any successful tier: rewind to the previous clipboard.
+    private func finalizeAfterPaste(savedClipboard: ClipboardSnapshot) async {
+        await restoreClipboard(savedClipboard)
     }
 
     /// Asynchronous paste. Returns the outcome so the caller can update its UI state
@@ -123,7 +117,6 @@ final class TextInserter {
         graceRestoreTask = nil
         let carriedSnapshot = pendingGraceSnapshot
         pendingGraceSnapshot = nil
-        let keepInClipboard = AppSettings.shared.alwaysKeepInClipboard
         let focusedElement = Self.copyFocusedElement()
         let editability = Self.classifyFocus(focusedElement)
         DebugLog.log("Paste: focus classification = \(editability)")
@@ -168,7 +161,7 @@ final class TextInserter {
         if canVerify {
             if Self.pasteLanded(element: focusedElement, pastedText: text, preValue: preValue) {
                 DebugLog.log("Paste: tier1 verified via AX — restoring previous clipboard")
-                await finalizeAfterPaste(text: text, keepInClipboard: keepInClipboard, savedClipboard: savedClipboard)
+                await finalizeAfterPaste(savedClipboard: savedClipboard)
                 return .pasted
             }
         } else {
@@ -179,19 +172,13 @@ final class TextInserter {
             // Edit & Learn button — auto-learn watcher physically can't track edits in
             // these apps, and this is the only way for the user to teach the dictionary.
             //
-            // Clipboard handling — we CAN'T verify the paste, so:
-            //   • alwaysKeepInClipboard = true → promote to a plain entry, keep forever
-            //     (clipboard managers pick it up);
-            //   • else → GRACE PERIOD: leave our (transient-marked) dictation on the
-            //     clipboard so a manual ⌘V works if the field was unavailable, then after
-            //     `gracePeriodSeconds` restore the previous clipboard. This avoids both
-            //     losing the text (when paste failed) and permanently re-pasting it.
+            // Clipboard handling — we CAN'T verify the paste, so GRACE PERIOD: leave
+            // our (transient-marked) dictation on the clipboard so a manual ⌘V works
+            // if the field was unavailable, then after `gracePeriodSeconds` restore
+            // the previous clipboard. This avoids both losing the text (when paste
+            // failed) and permanently re-pasting it.
             DebugLog.log("Paste: AX unverifiable — trusting tier1; grace-period clipboard (HUD with Edit & Learn)")
-            if keepInClipboard {
-                writePlainText(text)
-            } else {
-                scheduleGraceRestore(savedClipboard, ourText: text)
-            }
+            scheduleGraceRestore(savedClipboard, ourText: text)
             return .pastedNoAutoLearn
         }
 
@@ -201,7 +188,7 @@ final class TextInserter {
         try? await Task.sleep(nanoseconds: 400_000_000)
         if Self.pasteLanded(element: focusedElement, pastedText: text, preValue: preValue) {
             DebugLog.log("Paste: tier2 verified via AX — restoring clipboard")
-            await finalizeAfterPaste(text: text, keepInClipboard: keepInClipboard, savedClipboard: savedClipboard)
+            await finalizeAfterPaste(savedClipboard: savedClipboard)
             return .pasted
         }
 
@@ -211,7 +198,7 @@ final class TextInserter {
         try? await Task.sleep(nanoseconds: 400_000_000)
         if Self.pasteLanded(element: focusedElement, pastedText: text, preValue: preValue) {
             DebugLog.log("Paste: tier2b verified via AX — restoring clipboard")
-            await finalizeAfterPaste(text: text, keepInClipboard: keepInClipboard, savedClipboard: savedClipboard)
+            await finalizeAfterPaste(savedClipboard: savedClipboard)
             return .pasted
         }
 
@@ -220,7 +207,7 @@ final class TextInserter {
             let axOk = await insertViaAXUI(text: text)
             DebugLog.log("Paste tier3 (AXUIElement): ok=\(axOk)")
             if axOk {
-                await finalizeAfterPaste(text: text, keepInClipboard: keepInClipboard, savedClipboard: savedClipboard)
+                await finalizeAfterPaste(savedClipboard: savedClipboard)
                 return .pasted
             }
         } else {

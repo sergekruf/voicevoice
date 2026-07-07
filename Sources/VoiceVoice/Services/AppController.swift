@@ -89,7 +89,7 @@ final class AppController: ObservableObject {
     func bootstrap() {
         let tapOk = hotkeys.canCreateEventTap()
         let micStatus = AVAuthStatus.audio
-        DebugLog.log("App: bootstrap tapOk=\(tapOk) mic=\(micStatus.rawValue) onboardingDone=\(settings.onboardingDone) eagerLoad=\(settings.eagerLoad)")
+        DebugLog.log("App: bootstrap tapOk=\(tapOk) mic=\(micStatus.rawValue) onboardingDone=\(settings.onboardingDone)")
 
         migrateLifetimeStatsIfNeeded()
 
@@ -101,12 +101,9 @@ final class AppController: ObservableObject {
             hotkeys.start(with: settings.hotkey)
         }
 
-        // Lazy by default: model load is deferred until first user interaction
-        // (Fn press, menu open, window open). Opt in to eager load via Settings if
-        // you want first Fn press to be instant at the cost of slower startup.
-        if settings.eagerLoad {
-            ensureActiveEngineLoaded()
-        }
+        // Модель грузится сразу при запуске (в фоне, UI не блокирует): первая
+        // диктовка не должна ждать. Тоггл «Грузить при запуске» убран как лишний.
+        ensureActiveEngineLoaded()
     }
 
     /// One-time backfill: lifetime counters were added after the app already had a
@@ -135,9 +132,7 @@ final class AppController: ObservableObject {
         settings.onboardingDone = true
         onboardingNeeded = false
         hotkeys.start(with: settings.hotkey)
-        if settings.eagerLoad {
-            ensureActiveEngineLoaded()
-        }
+        ensureActiveEngineLoaded()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             HUDManager.shared.showReady()
         }
@@ -188,25 +183,29 @@ final class AppController: ObservableObject {
             state = .recording(level: 0)
             HUDManager.shared.showRecording()
             installEscMonitor()
+            if settings.muteSystemAudioOnRecord {
+                SystemAudioMuter.shared.mute()
+            }
             // Eager streaming: decode completed VAD chunks in the background while the
             // user keeps speaking, so on release only the trailing tail remains.
             // WhisperKit-only — Parakeet is fast enough and has no 223-token cap, so
             // it just transcribes the whole buffer on release.
-            // Live preview also requires the streaming loop — it re-decodes the tail
-            // between chunk commits, so the draft updates every ~1-2 s regardless of
-            // the eager toggle (final output is identical either way: same cuts).
-            if (settings.eagerTranscription || settings.livePreview) && settings.sttEngine == .whisperKit {
+            // Eager-стриминг для WhisperKit всегда включён: результат идентичен
+            // batch-режиму (те же резы по тишине), финал приходит быстрее, и от него
+            // же питается живой черновик. Отдельный тоггл убран как невостребованный.
+            if settings.sttEngine == .whisperKit {
                 transcriber.startStreaming(samples: { [weak self] in
                     self?.recorder.currentSamples() ?? []
                 })
             }
             // Parakeet и GigaAM получают собственный лёгкий превью-цикл (быстрые движки).
-            if settings.livePreview && settings.sttEngine == .parakeet {
+            // Живой черновик включён всегда (тоггл убран как лишний).
+            if settings.sttEngine == .parakeet {
                 ParakeetTranscriber.shared.startPreview(samples: { [weak self] in
                     self?.recorder.currentSamples() ?? []
                 })
             }
-            if settings.livePreview && settings.sttEngine == .gigaAM {
+            if settings.sttEngine == .gigaAM {
                 GigaAMTranscriber.shared.startPreview(samples: { [weak self] in
                     self?.recorder.currentSamples() ?? []
                 })
@@ -259,6 +258,7 @@ final class AppController: ObservableObject {
         switch state {
         case .recording:
             DebugLog.log("App: dictation cancelled via Esc")
+            SystemAudioMuter.shared.restore()
             recorder.cancel()
             transcriber.cancelStreaming()
         case .transcribing:
@@ -286,6 +286,7 @@ final class AppController: ObservableObject {
         }
         // Esc monitors intentionally stay installed: Esc can also cancel the
         // transcription phase (see cancelDictation). Removed when finalize runs.
+        SystemAudioMuter.shared.restore()   // звук возвращаем сразу, не дожидаясь распознавания
         let samples = recorder.stop()
         let duration = Double(samples.count) / AudioRecorder.targetSampleRate
         // RMS / peak of the captured buffer — confirms the mic actually picked up sound.
@@ -351,12 +352,6 @@ final class AppController: ObservableObject {
         if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
             appliedText = PunctuationFixer.fix(appliedText)
         }
-        if settings.autoFormat {
-            appliedText = TextFormatter.format(appliedText)
-        }
-        if settings.autoEmoji {
-            appliedText = EmojiEnhancer.enhance(appliedText)
-        }
         lastSubstitutions = applyResult.substitutions
 
         // Bump persistent counters for the Dashboard.
@@ -390,7 +385,7 @@ final class AppController: ObservableObject {
             settings.firstRecordAt = record.createdAt.timeIntervalSince1970
         }
 
-        DebugLog.log("App: finalize appliedLen=\(appliedText.count) autoPaste=\(settings.autoPaste)")
+        DebugLog.log("App: finalize appliedLen=\(appliedText.count)")
 
         // Transition to .complete and always hide the recording mic.
         lastPasteOutcome = .pending
@@ -401,36 +396,30 @@ final class AppController: ObservableObject {
         GigaAMTranscriber.shared.clearLivePreview()
 
         if !appliedText.isEmpty {
-            if settings.autoPaste {
-                let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                Task { [weak self] in
-                    guard let self else { return }
-                    let outcome = await self.inserter.paste(appliedText)
-                    await MainActor.run {
-                        self.lastPasteOutcome = outcome
-                        // Verified paste (`.pasted`) needs no HUD — the user sees the text in the field
-                        // and the auto-learn watcher will pick up edits automatically. All other outcomes
-                        // surface the HUD so the user gets feedback and access to Edit & Learn:
-                        //   • clipboardOnly / failed → text in clipboard, manual ⌘V needed
-                        //   • pastedNoAutoLearn → paste worked but watcher can't track edits in this app
-                        //     (Max / Bitrix24 / Termius / Slack…); Edit & Learn is the only way to teach
-                        //     corrections to the dictionary.
-                        if outcome != .pasted {
-                            HUDManager.shared.showResult(record: record)
-                        }
-                        if outcome == .pasted {
-                            TextChangeWatcher.shared.startWatching(
-                                pastedText: appliedText,
-                                frontBundleID: frontBundle,
-                                appliedSubstitutions: self.lastSubstitutions
-                            )
-                        }
+            let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            Task { [weak self] in
+                guard let self else { return }
+                let outcome = await self.inserter.paste(appliedText)
+                await MainActor.run {
+                    self.lastPasteOutcome = outcome
+                    // Verified paste (`.pasted`) needs no HUD — the user sees the text in the field
+                    // and the auto-learn watcher will pick up edits automatically. All other outcomes
+                    // surface the HUD so the user gets feedback and access to Edit & Learn:
+                    //   • clipboardOnly / failed → text in clipboard, manual ⌘V needed
+                    //   • pastedNoAutoLearn → paste worked but watcher can't track edits in this app
+                    //     (Max / Bitrix24 / Termius / Slack…); Edit & Learn is the only way to teach
+                    //     corrections to the dictionary.
+                    if outcome != .pasted {
+                        HUDManager.shared.showResult(record: record)
+                    }
+                    if outcome == .pasted {
+                        TextChangeWatcher.shared.startWatching(
+                            pastedText: appliedText,
+                            frontBundleID: frontBundle,
+                            appliedSubstitutions: self.lastSubstitutions
+                        )
                     }
                 }
-            } else {
-                inserter.copyOnly(appliedText)
-                lastPasteOutcome = .clipboardOnly
-                HUDManager.shared.showResult(record: record)
             }
         } else {
             DebugLog.log("App: appliedText is EMPTY — nothing to paste")
@@ -473,8 +462,6 @@ final class AppController: ObservableObject {
         if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
             t = PunctuationFixer.fix(t)
         }
-        if settings.autoFormat { t = TextFormatter.format(t) }
-        if settings.autoEmoji { t = EmojiEnhancer.enhance(t) }
         return t
     }
 

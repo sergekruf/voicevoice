@@ -86,9 +86,9 @@ struct DashboardView: View {
                                  icon: "checkmark.shield", subtitle: "сколько раз править до автоприменения")
                     }
                     HStack(spacing: 12) {
-                        StatCard(title: "Старт приложения", value: settings.eagerLoad ? "С прогревом" : "Lazy",
+                        StatCard(title: "Старт приложения", value: "С прогревом",
                                  icon: "bolt",
-                                 subtitle: settings.eagerLoad ? "Модель грузится при запуске" : "Модель грузится по требованию")
+                                 subtitle: "Модель грузится при запуске")
                         StatCard(title: "Следующая загрузка модели", value: nextLoadEstimate.0,
                                  icon: "clock.arrow.2.circlepath", subtitle: nextLoadEstimate.1)
                     }

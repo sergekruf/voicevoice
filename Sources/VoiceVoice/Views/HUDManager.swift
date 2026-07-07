@@ -50,7 +50,6 @@ final class HUDManager {
     func showResult(record: TranscriptionRecord) {
         hideRecording()
         if isQuiet { return }
-        guard AppSettings.shared.showResultHUD else { return }
         present(view: ResultHUD(record: record), ref: &resultPanel, size: NSSize(width: 520, height: 160), autohide: 7.0)
     }
 

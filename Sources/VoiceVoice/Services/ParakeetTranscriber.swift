@@ -203,7 +203,7 @@ final class ParakeetTranscriber: ObservableObject {
             }
         }
         lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
-        let blocklist = Transcriber.parseBlocklist(settings.hallucinationBlocklist)
+        let blocklist = Transcriber.defaultBlocklist
         // Умная склейка: на вынужденных резах убираем ложную точку/заглавную.
         let cleaned = Transcriber.cleanup(Transcriber.stripHallucinations(Transcriber.joinChunkTexts(items), sentenceBlocklist: blocklist))
         DebugLog.log("Parakeet: done in \(lastProcessingMs)ms, chunks=\(chunks.count), failed=\(failedChunks), len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")

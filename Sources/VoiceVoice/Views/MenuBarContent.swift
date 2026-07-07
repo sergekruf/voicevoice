@@ -17,9 +17,8 @@ struct MenuBarContent: View {
 
     var body: some View {
         // НЕ вызывать warmUpIfNeeded() здесь: MenuBarExtra(.menu) материализует body
-        // уже на старте приложения (проверено по логу), и «ленивая» загрузка модели
-        // при выключенном eagerLoad превращалась в фикцию — модель качалась/грузилась
-        // сразу при запуске. Ленивую загрузку делает handlePress / кнопка в настройках.
+        // уже на старте приложения (проверено по логу) — это не сигнал «пользователь
+        // открыл меню». Модель и так грузится в bootstrap().
         // Status header (disabled item shows current state).
         Text(statusText)
 
