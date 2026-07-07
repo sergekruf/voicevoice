@@ -262,6 +262,15 @@ final class Transcriber: ObservableObject {
             // decodeOneChunk includes the empty-rescue retry → eager chunks no longer
             // silently lose ~12 с of speech when Whisper returns empty.
             let text = await decodeOneChunk(chunk, pipe: pipe, usePunctPrompt: usePunctPrompt)
+            // Отпускание клавиши посреди декода: finishStreaming отменяет задачу,
+            // WhisperKit бросает CancellationError, текст приходит ПУСТЫМ. Коммитить
+            // смещение нельзя — иначе хвост в finishStreaming пропустит этот кусок и
+            // начало диктовки потеряется (реальный кейс: из 13 с осталось 2.6 с).
+            // Прерванный кусок уходит в хвост и передекодируется там.
+            if text.isEmpty && Task.isCancelled {
+                DebugLog.log("Stream: in-flight chunk decode was cancelled — leaving audio for the tail")
+                break
+            }
             // The session may have been cancelled (Esc) — and even restarted — while
             // the decode was in flight; `cut` is in the OLD buffer's coordinates.
             guard generation == streamGeneration else {
@@ -403,7 +412,9 @@ final class Transcriber: ObservableObject {
         DecodingOptions(
             verbose: false,
             task: .transcribe,
-            language: settings.language,
+            // «auto» из настроек — это НЕ код языка: WhisperKit ожидает валидный код
+            // или nil (автоопределение). Строка "auto" ломала префилл языкового токена.
+            language: settings.language == "auto" ? nil : settings.language,
             temperature: 0,
             temperatureFallbackCount: 3,
             sampleLength: 224,
@@ -556,13 +567,17 @@ final class Transcriber: ObservableObject {
             if t.isEmpty { continue }
             if out.isEmpty { out = t; continue }
             if items[i - 1].realPauseAfter {
-                // Настоящая граница предложения. Движок иногда отдаёт следующий кусок
-                // со строчной («…твой текст. повторные коммиты…») — после терминатора
-                // поднимаем регистр первой буквы.
+                // Настоящая пауза. Два симметричных артефакта стыка:
+                //  • терминатор есть, а следующий кусок со строчной («…текст. повторные…»)
+                //    → поднимаем регистр;
+                //  • терминатора НЕТ (движок понял, что предложение продолжается:
+                //    «…связь от | У других…»), а следующий кусок начат с заглавной —
+                //    это «начало высказывания» декодера, а не граница → понижаем
+                //    служебное слово (список консервативный, имена не трогаем).
                 if let last = out.last, ".!?…".contains(last) {
                     out += " " + uppercasedLead(t)
                 } else {
-                    out += " " + t
+                    out += " " + lowercasedLeadIfFunction(t)
                 }
             } else {
                 out = stripTrailingSentenceTerminator(out)

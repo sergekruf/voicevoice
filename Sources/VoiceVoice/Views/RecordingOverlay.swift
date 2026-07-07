@@ -8,6 +8,7 @@ struct RecordingOverlay: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
+    @ObservedObject private var gigaam = GigaAMTranscriber.shared
 
     static let panelSize = NSSize(width: 640, height: 240)
 
@@ -41,7 +42,11 @@ struct RecordingOverlay: View {
 
     /// Draft from whichever engine is active.
     private var previewText: String {
-        settings.sttEngine == .parakeet ? parakeet.livePreviewText : transcriber.livePreviewText
+        switch settings.sttEngine {
+        case .whisperKit: return transcriber.livePreviewText
+        case .parakeet: return parakeet.livePreviewText
+        case .gigaAM: return gigaam.livePreviewText
+        }
     }
 
     private var levelValue: Float {

@@ -31,6 +31,7 @@ final class AppController: ObservableObject {
 
     private var transcriberObserver: AnyCancellable?
     private var parakeetObserver: AnyCancellable?
+    private var gigaAMObserver: AnyCancellable?
 
     // Transient Esc-to-cancel monitors, installed from recording start until the
     // transcription finishes (Esc aborts either phase).
@@ -73,6 +74,12 @@ final class AppController: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
                 guard self?.settings.sttEngine == .parakeet else { return }
+                apply(state)
+            }
+        gigaAMObserver = GigaAMTranscriber.shared.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard self?.settings.sttEngine == .gigaAM else { return }
                 apply(state)
             }
     }
@@ -148,6 +155,7 @@ final class AppController: ObservableObject {
         switch settings.sttEngine {
         case .whisperKit: transcriber.ensureLoaded()
         case .parakeet: ParakeetTranscriber.shared.ensureLoaded()
+        case .gigaAM: GigaAMTranscriber.shared.ensureLoaded()
         }
     }
 
@@ -192,9 +200,14 @@ final class AppController: ObservableObject {
                     self?.recorder.currentSamples() ?? []
                 })
             }
-            // Parakeet gets its own light preview loop (fast engine).
+            // Parakeet и GigaAM получают собственный лёгкий превью-цикл (быстрые движки).
             if settings.livePreview && settings.sttEngine == .parakeet {
                 ParakeetTranscriber.shared.startPreview(samples: { [weak self] in
+                    self?.recorder.currentSamples() ?? []
+                })
+            }
+            if settings.livePreview && settings.sttEngine == .gigaAM {
+                GigaAMTranscriber.shared.startPreview(samples: { [weak self] in
                     self?.recorder.currentSamples() ?? []
                 })
             }
@@ -260,8 +273,10 @@ final class AppController: ObservableObject {
         HUDManager.shared.hideRecording()
         hotkeys.resetPressState()   // keep the Caps Lock toggle in sync
         Task { await ParakeetTranscriber.shared.stopPreview() }
+        Task { await GigaAMTranscriber.shared.stopPreview() }
         transcriber.clearLivePreview()
         ParakeetTranscriber.shared.clearLivePreview()
+        GigaAMTranscriber.shared.clearLivePreview()
     }
 
     private func handleRelease() {
@@ -300,10 +315,13 @@ final class AppController: ObservableObject {
                 rawText = await ParakeetTranscriber.shared.transcribe(audio: samples)
             case .whisperKit:
                 rawText = await self.transcriber.finishStreaming(finalSamples: samples)
+            case .gigaAM:
+                rawText = await GigaAMTranscriber.shared.transcribe(audio: samples)
             }
             // Neural punctuation/casing restoration (opt-in) — on the raw STT text,
             // before the rest of the pipeline; replaces the regex PunctuationFixer.
-            if self.settings.punctuationModel {
+            // GigaAM e2e расставляет знаки сам — RUPunct поверх только навредит.
+            if self.settings.punctuationModel && self.settings.sttEngine != .gigaAM {
                 rawText = await RUPunctService.shared.punctuate(rawText)
             }
             // Esc during transcription cancels this task — drop the result instead
@@ -329,8 +347,8 @@ final class AppController: ObservableObject {
         let dictText = applyResult.text
         var appliedText = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
         // Regex punctuation fixer — skipped when the neural model already restored
-        // punctuation upstream (handled in handleRelease before finalize).
-        if settings.fixPunctuation && !settings.punctuationModel {
+        // punctuation upstream, and for GigaAM (у e2e-модели знаки уже правильные).
+        if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
             appliedText = PunctuationFixer.fix(appliedText)
         }
         if settings.autoFormat {
@@ -380,6 +398,7 @@ final class AppController: ObservableObject {
         HUDManager.shared.hideRecording()
         transcriber.clearLivePreview()
         ParakeetTranscriber.shared.clearLivePreview()
+        GigaAMTranscriber.shared.clearLivePreview()
 
         if !appliedText.isEmpty {
             if settings.autoPaste {
@@ -435,8 +454,9 @@ final class AppController: ObservableObject {
         switch settings.sttEngine {
         case .parakeet: raw = await ParakeetTranscriber.shared.transcribe(audio: samples)
         case .whisperKit: raw = await transcriber.transcribe(audio: samples)
+        case .gigaAM: raw = await GigaAMTranscriber.shared.transcribe(audio: samples)
         }
-        if settings.punctuationModel {
+        if settings.punctuationModel && settings.sttEngine != .gigaAM {
             raw = await RUPunctService.shared.punctuate(raw)
         }
         return applyTextPipeline(raw)
@@ -448,8 +468,11 @@ final class AppController: ObservableObject {
         guard !rawText.isEmpty else { return rawText }
         let dictText = applier.apply(to: rawText).text
         var t = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
-        // Skip the regex fixer when the neural model already restored punctuation.
-        if settings.fixPunctuation && !settings.punctuationModel { t = PunctuationFixer.fix(t) }
+        // Skip the regex fixer when the neural model already restored punctuation
+        // (или движок e2e расставил знаки сам).
+        if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
+            t = PunctuationFixer.fix(t)
+        }
         if settings.autoFormat { t = TextFormatter.format(t) }
         if settings.autoEmoji { t = EmojiEnhancer.enhance(t) }
         return t

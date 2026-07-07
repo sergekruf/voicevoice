@@ -19,11 +19,16 @@ private struct MenuBarLabel: View {
     @ObservedObject private var controller = AppController.shared
     @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
+    @ObservedObject private var gigaam = GigaAMTranscriber.shared
     @ObservedObject private var settings = AppSettings.shared
 
     /// State of whichever engine is currently selected.
     private var engineState: Transcriber.ModelState {
-        settings.sttEngine == .parakeet ? parakeet.state : transcriber.state
+        switch settings.sttEngine {
+        case .whisperKit: return transcriber.state
+        case .parakeet: return parakeet.state
+        case .gigaAM: return gigaam.state
+        }
     }
 
     var body: some View {

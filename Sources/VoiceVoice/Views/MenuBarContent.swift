@@ -4,15 +4,22 @@ struct MenuBarContent: View {
     @ObservedObject private var controller = AppController.shared
     @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
+    @ObservedObject private var gigaam = GigaAMTranscriber.shared
     @ObservedObject private var settings = AppSettings.shared
 
     private var engineState: Transcriber.ModelState {
-        settings.sttEngine == .parakeet ? parakeet.state : transcriber.state
+        switch settings.sttEngine {
+        case .whisperKit: return transcriber.state
+        case .parakeet: return parakeet.state
+        case .gigaAM: return gigaam.state
+        }
     }
 
     var body: some View {
-        // Opening the menu is a strong signal the user will record soon → warm the model.
-        let _ = controller.warmUpIfNeeded()
+        // НЕ вызывать warmUpIfNeeded() здесь: MenuBarExtra(.menu) материализует body
+        // уже на старте приложения (проверено по логу), и «ленивая» загрузка модели
+        // при выключенном eagerLoad превращалась в фикцию — модель качалась/грузилась
+        // сразу при запуске. Ленивую загрузку делает handlePress / кнопка в настройках.
         // Status header (disabled item shows current state).
         Text(statusText)
 

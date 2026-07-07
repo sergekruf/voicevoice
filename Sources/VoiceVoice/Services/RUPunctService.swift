@@ -49,9 +49,16 @@ final class RUPunctService {
 
             tokenizer = try await AutoTokenizer.from(modelFolder: folder)
 
-            // Compile .mlpackage → .mlmodelc once, cache it.
-            let mlpkg = folder.appendingPathComponent("RUPunct_small.mlpackage")
-            let cached = AppPaths.appSupportDir.appendingPathComponent("RUPunct_small.mlmodelc")
+            // Модель — первый *.mlpackage в папке ресурсов: имя не зашито, чтобы
+            // small/medium/big менялись простой заменой файла (+ токенизатор/labels).
+            let contents = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            guard let mlpkg = contents.first(where: { $0.pathExtension == "mlpackage" }) else {
+                throw Err(m: "no .mlpackage in RUPunct resources (нейро-пунктуация недоступна)")
+            }
+            DebugLog.log("RUPunct: using model \(mlpkg.lastPathComponent)")
+            // Compile .mlpackage → .mlmodelc once, cache it (имя кэша — от имени пакета).
+            let cached = AppPaths.appSupportDir.appendingPathComponent(
+                mlpkg.deletingPathExtension().lastPathComponent + ".mlmodelc")
             let compiled: URL
             if FileManager.default.fileExists(atPath: cached.path) {
                 compiled = cached
@@ -158,11 +165,26 @@ final class RUPunctService {
         // 1) Дефис в составных словах: «почему - то» → «почему-то». Тире «—» не трогаем.
         let t0 = text.replacingOccurrences(of: " - ", with: "-")
 
+        // 1б) Противоречивая граница от модели: «распознана. так» — точка есть, а
+        //     заглавной у следующего слова нет. Настоящая граница размечается парой
+        //     PERIOD + UPPER; точка перед строчным словом — слабый сигнал, убираем.
+        //     «?» и «!» не трогаем — их потеря дороже ложного разрыва.
+        var words = t0.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        if words.count > 1 {
+            for i in 0..<(words.count - 1) {
+                let w = words[i]
+                guard w.hasSuffix(".") || w.hasSuffix("…") else { continue }
+                guard let nextFirst = words[i + 1].first, nextFirst.isLetter, nextFirst.isLowercase else { continue }
+                var trimmed = w
+                while trimmed.hasSuffix(".") || trimmed.hasSuffix("…") { trimmed.removeLast() }
+                if !trimmed.isEmpty { words[i] = trimmed }
+            }
+        }
+
         // 2) Чиним ложные заглавные у служебных слов в середине предложения:
         //    • слово-начинатель (или «у» + притяжательное) → пропущена точка: ставим её,
         //      заглавную оставляем;
         //    • прочие служебные → просто ошибка регистра: понижаем.
-        let words = t0.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
         var atStart = true
         var out: [String] = []
         for (idx, w) in words.enumerated() {
@@ -265,10 +287,19 @@ final class RUPunctService {
 
     /// RUPunct трейнилась на тексте в нижнем регистре без знаков — нормализуем вход:
     /// lowercase + убираем знаки-терминаторы и запятые (модель их вернёт). Дефис
-    /// внутри слов сохраняем.
+    /// внутри слов сохраняем. Знаки МЕЖДУ ЦИФРАМИ («2,5», «12:30», «10.06.2026») —
+    /// часть числа, а не пунктуация: модель их не восстановит, поэтому не трогаем —
+    /// раньше «12:30» необратимо превращалось в «12 30».
     private func normalizeInput(_ s: String) -> String {
         var t = s.lowercased()
-        t = t.replacingOccurrences(of: "[.,!?;:…—«»\"()]", with: " ", options: .regularExpression)
+        // Три альтернативы: всегда-мусорные знаки; «.,:» без цифры слева; «.,:» без
+        // цифры справа. Разделитель, у которого цифры С ОБЕИХ сторон, не матчится
+        // ни одной из них и выживает.
+        t = t.replacingOccurrences(
+            of: #"[!?;…—«»"()]|(?<!\d)[.,:]|[.,:](?!\d)"#,
+            with: " ",
+            options: .regularExpression
+        )
         while t.contains("  ") { t = t.replacingOccurrences(of: "  ", with: " ") }
         return t.trimmingCharacters(in: .whitespaces)
     }

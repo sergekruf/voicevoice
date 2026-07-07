@@ -23,6 +23,10 @@ enum HotkeyKind: String, CaseIterable, Identifiable {
 enum STTEngine: String, CaseIterable, Identifiable {
     case whisperKit = "whisperKit"
     case parakeet = "parakeet"
+    /// GigaAM-v3 e2e_ctc — русскоязычная SOTA (пунктуация и нормализация встроены).
+    /// Экспериментально: модель конвертируется локально (.mltools/convert_gigaam.py)
+    /// и в настройках видна только если установлена.
+    case gigaAM = "gigaAM"
 
     var id: String { rawValue }
 
@@ -30,6 +34,7 @@ enum STTEngine: String, CaseIterable, Identifiable {
         switch self {
         case .whisperKit: return "WhisperKit (Whisper, классический)"
         case .parakeet: return "Parakeet TDT v3 (по умолчанию, быстрый)"
+        case .gigaAM: return "GigaAM v3 (русский, эксперимент)"
         }
     }
 }

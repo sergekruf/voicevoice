@@ -2,6 +2,19 @@ import SwiftUI
 
 struct LoadingIndicator: View {
     @ObservedObject private var transcriber = Transcriber.shared
+    @ObservedObject private var parakeet = ParakeetTranscriber.shared
+    @ObservedObject private var gigaam = GigaAMTranscriber.shared
+    @ObservedObject private var settings = AppSettings.shared
+
+    /// Состояние АКТИВНОГО движка — раньше индикатор смотрел только на Whisper,
+    /// и при загрузке Parakeet/GigaAM прогресс не показывался.
+    private var state: Transcriber.ModelState {
+        switch settings.sttEngine {
+        case .whisperKit: return transcriber.state
+        case .parakeet: return parakeet.state
+        case .gigaAM: return gigaam.state
+        }
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -32,7 +45,7 @@ struct LoadingIndicator: View {
     }
 
     private var title: String {
-        switch transcriber.state {
+        switch state {
         case .notLoaded: return "Подготовка модели…"
         case .downloading(let p): return "Загрузка модели — \(Int(p * 100))%"
         case .loading: return "Компиляция модели для Neural Engine…"
@@ -42,9 +55,9 @@ struct LoadingIndicator: View {
     }
 
     private var subtitle: String {
-        switch transcriber.state {
+        switch state {
         case .notLoaded: return "Сейчас начнётся"
-        case .downloading: return "Из HuggingFace, один раз"
+        case .downloading: return "Скачивается один раз"
         case .loading: return "При первом запуске занимает несколько минут — нужно один раз скомпилировать модель для Neural Engine. Дальше — мгновенно."
         case .ready: return "Зажми Fn для записи"
         case .error: return "Открой меню → Настройки"
