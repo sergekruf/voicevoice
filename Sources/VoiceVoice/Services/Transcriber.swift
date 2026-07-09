@@ -412,6 +412,11 @@ final class Transcriber: ObservableObject {
     /// тишины в окне нет, режем по `maxChunkSamples` (как раньше). Ноль новых
     /// зависимостей; нейро-VAD (Silero) при необходимости — отдельный шаг.
     private static let minSilenceFrames = 3
+    /// Порог «настоящей границы предложения»: пауза ≥0.5 с. Более короткая тишина
+    /// (0.3–0.5 с) — годная точка реза, но слишком часто оказывается заминкой
+    /// ВНУТРИ фразы или растянутым словом («скину…ть») — на таком стыке ложная
+    /// точка/заглавная должны убираться склейкой, а не сохраняться.
+    private static let realPauseMinFrames = 5
 
     /// Делит аудио на куски ≤ `maxChunkSamples`, стараясь резать по самой длинной
     /// тишине в окне `[target ± silenceSearchWindow]`. Если тишины нет — режет
@@ -465,10 +470,13 @@ final class Transcriber: ObservableObject {
             let vadResult = vad.voiceActivity(in: window)
             if let silence = vad.findLongestSilence(in: vadResult),
                silence.endIndex - silence.startIndex >= minSilenceFrames {
-                // Настоящая пауза → режем по её середине (макс. отступ от речи).
-                let silenceMid = silence.startIndex + (silence.endIndex - silence.startIndex) / 2
+                // Тишина ≥0.3 с → режем по её середине (макс. отступ от речи), но
+                // границей ПРЕДЛОЖЕНИЯ считаем только паузу ≥0.5 с — короткие
+                // заминки внутри фразы иначе оставляли ложную точку на стыке.
+                let frames = silence.endIndex - silence.startIndex
+                let silenceMid = silence.startIndex + frames / 2
                 cutAt = searchStart + vad.voiceActivityIndexToAudioSampleIndex(silenceMid)
-                realPause = true
+                realPause = frames >= realPauseMinFrames
             } else {
                 // Сплошная речь без паузы → режем в самой тихой точке (стык слов/слогов),
                 // а не вслепую посреди слова.
@@ -527,7 +535,11 @@ final class Transcriber: ObservableObject {
     static func joinChunkTexts(_ items: [(text: String, realPauseAfter: Bool)]) -> String {
         var out = ""
         for (i, item) in items.enumerated() {
-            let t = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var t = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Кусок, начавшийся с обрезанного резом слова, движки помечают мусорной
+            // пунктуацией в начале («..ть», «, слово») — вычищаем ведущие знаки.
+            while let f = t.first, ".,;:…".contains(f) { t.removeFirst() }
+            t = t.trimmingCharacters(in: .whitespaces)
             if t.isEmpty { continue }
             if out.isEmpty { out = t; continue }
             if items[i - 1].realPauseAfter {

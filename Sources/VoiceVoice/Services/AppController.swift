@@ -42,6 +42,7 @@ final class AppController: ObservableObject {
     /// In-flight decode of the released dictation — cancellable by Esc while the
     /// model is still transcribing (or even still downloading/loading).
     private var transcribeTask: Task<Void, Never>?
+    private var warmIdleTimer: Timer?
 
     private init() {
         recorder.onLevel = { [weak self] level in
@@ -104,6 +105,11 @@ final class AppController: ObservableObject {
         // Модель грузится сразу при запуске (в фоне, UI не блокирует): первая
         // диктовка не должна ждать. Тоггл «Грузить при запуске» убран как лишний.
         ensureActiveEngineLoaded()
+        // Тёплый аудио-движок для мгновенного старта записи (no-op без разрешения
+        // на микрофон или при выключенной настройке) + вахта простоя, отпускающая
+        // микрофон, когда пользователь отошёл.
+        recorder.startWarmListening()
+        startWarmIdleWatch()
     }
 
     /// One-time backfill: lifetime counters were added after the app already had a
@@ -133,6 +139,7 @@ final class AppController: ObservableObject {
         onboardingNeeded = false
         hotkeys.start(with: settings.hotkey)
         ensureActiveEngineLoaded()
+        recorder.startWarmListening()   // разрешение на микрофон только что выдано
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             HUDManager.shared.showReady()
         }
@@ -151,6 +158,42 @@ final class AppController: ObservableObject {
         case .whisperKit: transcriber.ensureLoaded()
         case .parakeet: ParakeetTranscriber.shared.ensureLoaded()
         case .gigaAM: GigaAMTranscriber.shared.ensureLoaded()
+        }
+    }
+
+    /// Применить смену настройки «Мгновенный старт» или устройства ввода:
+    /// перезапустить (или погасить) тёплый аудио-движок.
+    func restartWarmListening() {
+        recorder.stopWarmListening()
+        recorder.startWarmListening()
+    }
+
+    // MARK: - Warm-idle watch
+
+    /// Открытый микрофон держит PreventUserIdleSystemSleep — Мак с тёплым движком
+    /// не уснул бы сам и разряжался. Если пользователь не трогает ввод ≥3 минут,
+    /// диктовка невозможна физически → отпускаем микрофон (система может спать);
+    /// при возвращении активности прогреваем обратно.
+    private static let warmIdleSuspendSeconds: TimeInterval = 180
+
+    private func startWarmIdleWatch() {
+        warmIdleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickWarmIdle() }
+        }
+    }
+
+    private func tickWarmIdle() {
+        guard settings.instantRecordStart else { return }
+        if case .recording = state { return }   // активную запись не трогаем
+        let idle = CGEventSource.secondsSinceLastEventType(
+            .combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+        if idle >= Self.warmIdleSuspendSeconds {
+            if recorder.isWarmListening {
+                DebugLog.log("Audio: user idle \(Int(idle))s — suspending warm listening (allow sleep)")
+                recorder.stopWarmListening()
+            }
+        } else if !recorder.isWarmListening {
+            recorder.startWarmListening()
         }
     }
 

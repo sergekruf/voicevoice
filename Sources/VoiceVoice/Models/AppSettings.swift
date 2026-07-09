@@ -114,6 +114,10 @@ final class AppSettings: ObservableObject {
     /// Приглушать системный звук (музыку/видео) на время записи, чтобы он не
     /// попадал в микрофон. Состояние вывода восстанавливается на отпускании клавиши.
     @AppStorage("muteSystemAudioOnRecord") var muteSystemAudioOnRecord: Bool = false
+    /// Мгновенный старт записи: аудио-движок работает постоянно (кольцевой буфер
+    /// ~1.5 с), нажатие клавиши стартует захват без задержки инициализации железа
+    /// и прихватывает ~0.5 с ДО нажатия. Цена — постоянный индикатор микрофона macOS.
+    @AppStorage("instantRecordStart") var instantRecordStart: Bool = true
     /// Master switch — when true, ALL HUDs / toasts / overlays are suppressed:
     /// recording mic, result HUD, learned-correction toast, ready toast, model-loading
     /// indicator. Useful for screencasts, presentations, focused work.

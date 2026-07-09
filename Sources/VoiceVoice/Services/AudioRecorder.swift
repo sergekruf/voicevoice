@@ -5,13 +5,28 @@ import CoreAudio
 
 final class AudioRecorder {
     static let targetSampleRate: Double = 16_000
+    /// Сколько звука ДО нажатия клавиши включать в диктовку (тёплый режим) — ловит
+    /// слова, произнесённые одновременно с нажатием.
+    private static let preRollSeconds: Double = 0.5
+    /// Ёмкость кольцевого буфера тёплого режима.
+    private static let ringSeconds: Double = 1.5
+
+    /// Режимы захвата. «Тёплый» (warm) — движок работает постоянно, звук идёт в
+    /// кольцевой буфер: старт диктовки мгновенный (без 0.3–1 с инициализации
+    /// аудио-железа), плюс пре-ролл. Цена — постоянный индикатор микрофона macOS;
+    /// управляется настройкой `instantRecordStart`.
+    private enum Mode { case idle, warm, recording }
+    /// Читать/менять ТОЛЬКО под bufferQueue.
+    private var mode: Mode = .idle
 
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
     private var converterOutputFormat: AVAudioFormat?
     private var buffer: [Float] = []
+    private var ring: [Float] = []
     private let bufferQueue = DispatchQueue(label: "voicevoice.audio.buffer")
-    private(set) var isRecording = false
+    var isRecording: Bool { bufferQueue.sync { mode == .recording } }
+    var isWarmListening: Bool { bufferQueue.sync { mode == .warm } }
     private var configChangeObserver: NSObjectProtocol?
 
     /// Callback fired ~10× per second with the current RMS (0..1).
@@ -30,9 +45,97 @@ final class AudioRecorder {
         }
     }
 
+    /// Начать диктовку. Из тёплого режима — мгновенно (движок уже работает):
+    /// в буфер записи попадает pre-roll из кольца (~0.5 с до нажатия) и захват
+    /// продолжается без разрыва. Из холодного — прежний путь со стартом движка.
     func start() throws {
-        guard !isRecording else { return }
+        let current = bufferQueue.sync { mode }
+        switch current {
+        case .recording:
+            return
+        case .warm:
+            var preRoll = 0
+            bufferQueue.sync {
+                buffer = Array(ring.suffix(Int(Self.targetSampleRate * Self.preRollSeconds)))
+                preRoll = buffer.count
+                mode = .recording
+            }
+            DebugLog.log("Audio: instant start from warm engine (preRoll=\(preRoll) samples)")
+        case .idle:
+            try startEngine()
+            bufferQueue.sync {
+                buffer.removeAll(keepingCapacity: true)
+                mode = .recording
+            }
+        }
+    }
 
+    func stop() -> [Float] {
+        let (samples, wasRecording) = bufferQueue.sync { (buffer, mode == .recording) }
+        guard wasRecording else { return [] }
+        finishCapture()
+        return samples
+    }
+
+    func cancel() {
+        let wasRecording = bufferQueue.sync { mode == .recording }
+        if wasRecording { finishCapture() }
+        bufferQueue.sync { buffer.removeAll(keepingCapacity: true) }
+    }
+
+    /// После записи: либо вернуться в тёплый режим (движок продолжает работать,
+    /// кольцо очищается — хвост прошлой диктовки не должен попасть в следующий
+    /// pre-roll), либо полностью погасить движок.
+    private func finishCapture() {
+        if AppSettings.shared.instantRecordStart {
+            bufferQueue.sync {
+                mode = .warm
+                ring.removeAll(keepingCapacity: true)
+            }
+        } else {
+            stopEngine()
+            bufferQueue.sync { mode = .idle }
+        }
+    }
+
+    // MARK: - Warm listening (мгновенный старт)
+
+    /// Поднять тёплый режим: движок работает постоянно, звук идёт в кольцевой буфер.
+    /// No-op без разрешения на микрофон (чтобы не дёргать TCC из фона) и при
+    /// выключенной настройке.
+    func startWarmListening() {
+        guard AppSettings.shared.instantRecordStart else { return }
+        guard AVAuthStatus.audio == .authorized else { return }
+        let current = bufferQueue.sync { mode }
+        guard current == .idle else { return }
+        do {
+            try startEngine()
+            bufferQueue.sync {
+                ring.removeAll(keepingCapacity: true)
+                mode = .warm
+            }
+            DebugLog.log("Audio: warm listening started (instant record enabled)")
+        } catch {
+            DebugLog.log("Audio: warm listening failed — \(error.localizedDescription)")
+        }
+    }
+
+    /// Погасить тёплый режим (настройку выключили / меняется устройство).
+    /// Активную запись не трогает.
+    func stopWarmListening() {
+        let current = bufferQueue.sync { mode }
+        guard current == .warm else { return }
+        stopEngine()
+        bufferQueue.sync {
+            mode = .idle
+            ring.removeAll(keepingCapacity: true)
+        }
+        DebugLog.log("Audio: warm listening stopped")
+    }
+
+    // MARK: - Engine lifecycle
+
+    private func startEngine() throws {
         // If the user has picked a specific input device in Settings, route engine input
         // through it. Empty/stale UID = system default — which must be re-bound
         // EXPLICITLY: a previous run may have pinned the AUHAL to a specific device,
@@ -63,8 +166,6 @@ final class AudioRecorder {
         converterOutputFormat = outFormat
         converter = AVAudioConverter(from: inputFormat, to: outFormat)
 
-        bufferQueue.sync { buffer.removeAll(keepingCapacity: true) }
-
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] inBuf, _ in
             self?.process(inBuf)
@@ -72,7 +173,6 @@ final class AudioRecorder {
 
         engine.prepare()
         try engine.start()
-        isRecording = true
 
         // The engine silently stops itself when the input device disappears mid-
         // recording (BT headphones died, default input switched). Without this
@@ -85,23 +185,10 @@ final class AudioRecorder {
         }
     }
 
-    func stop() -> [Float] {
-        guard isRecording else { return [] }
+    private func stopEngine() {
         removeConfigObserver()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        isRecording = false
-        return bufferQueue.sync { buffer }
-    }
-
-    func cancel() {
-        if isRecording {
-            removeConfigObserver()
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            isRecording = false
-        }
-        bufferQueue.sync { buffer.removeAll(keepingCapacity: true) }
     }
 
     private func removeConfigObserver() {
@@ -116,8 +203,10 @@ final class AudioRecorder {
     /// alternative was losing everything after the switch silently.
     private func handleConfigurationChange() {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isRecording else { return }
-            DebugLog.log("Audio: engine configuration changed mid-recording — restarting capture")
+            guard let self else { return }
+            let active = self.bufferQueue.sync { self.mode != .idle }
+            guard active else { return }
+            DebugLog.log("Audio: engine configuration changed — restarting capture")
             let input = self.engine.inputNode
             input.removeTap(onBus: 0)
             let inputFormat = input.inputFormat(forBus: 0)
@@ -175,7 +264,16 @@ final class AudioRecorder {
         }
 
         bufferQueue.sync {
-            buffer.append(contentsOf: chunk)
+            switch mode {
+            case .recording:
+                buffer.append(contentsOf: chunk)
+            case .warm:
+                ring.append(contentsOf: chunk)
+                let cap = Int(Self.targetSampleRate * Self.ringSeconds)
+                if ring.count > cap { ring.removeFirst(ring.count - cap) }
+            case .idle:
+                break
+            }
         }
     }
 

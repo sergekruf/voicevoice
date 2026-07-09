@@ -23,6 +23,18 @@ struct ResultHUD: View {
                     }
                 }
                 Spacer()
+                // Страховка для приложений без AX-проверки: если вставка не долетела,
+                // текст можно забрать в буфер вручную (после вставки буфер сразу
+                // восстанавливается и диктовки в нём больше нет).
+                Button {
+                    TextInserter.shared.copyOnly(record.appliedText)
+                    HUDManager.shared.hideResult()
+                } label: {
+                    Label("Копировать", systemImage: "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button {
                     EditAndLearnController.shared.open(record: record)
                     HUDManager.shared.hideResult()
@@ -105,7 +117,7 @@ struct ResultHUD: View {
     private var statusSubtitle: String? {
         switch controller.lastPasteOutcome {
         case .pasted: return nil
-        case .pastedNoAutoLearn: return "В этом приложении автообучение недоступно. Жми Edit & Learn, чтобы добавить исправление в словарь вручную."
+        case .pastedNoAutoLearn: return "Если текст не появился в поле — «Копировать» и вставь ⌘V. Автообучение здесь недоступно: исправления — через Edit & Learn."
         case .clipboardOnly: return "Поставь курсор в нужное поле и нажми ⌘V — текст в буфере"
         case .failed: return "Нажми ⌘V в активном поле — текст в буфере"
         case .skipped: return "Авто-вставка отключена в настройках"

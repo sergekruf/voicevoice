@@ -107,6 +107,15 @@ struct SettingsView: View {
                 }
             }
             Section("Микрофон") {
+                Toggle(isOn: $settings.instantRecordStart) {
+                    HStack(spacing: 4) {
+                        Text("Мгновенный старт записи")
+                        HelpHint(text: "Аудио-движок работает постоянно: запись стартует сразу при нажатии клавиши (без ~0.5–1 с инициализации микрофона) и прихватывает полсекунды ДО нажатия — первые слова не теряются, даже если начать говорить одновременно с нажатием. Цена: macOS будет постоянно показывать индикатор использования микрофона. Звук до нажатия НЕ сохраняется — в памяти держится только скользящие полторы секунды, и на диск/в распознавание они попадают только при нажатой клавише.")
+                    }
+                }
+                .onChange(of: settings.instantRecordStart) { _, _ in
+                    AppController.shared.restartWarmListening()
+                }
                 Toggle(isOn: $settings.muteSystemAudioOnRecord) {
                     HStack(spacing: 4) {
                         Text("Приглушать звук во время записи")
@@ -123,6 +132,10 @@ struct SettingsView: View {
                         Text("Устройство ввода")
                         HelpHint(text: "Какой микрофон использовать для записи. «Системный» автоматически следует за выбором macOS (System Settings → Sound → Input).")
                     }
+                }
+                .onChange(of: settings.inputDeviceUID) { _, _ in
+                    // Тёплый движок привязан к устройству — перепривязываем сразу.
+                    AppController.shared.restartWarmListening()
                 }
                 HStack {
                     Button("Обновить список") { reloadInputDevices() }

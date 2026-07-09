@@ -330,11 +330,33 @@ final class GigaAMTranscriber: ObservableObject {
             }
             prev = best
         }
-        return Self.stripUnitTails(
-            pieces.joined()
-                .replacingOccurrences(of: "▁", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.dropInconsistentBoundaries(
+            Self.stripUnitTails(
+                pieces.joined()
+                    .replacingOccurrences(of: "▁", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            )
         )
+    }
+
+    // MARK: - Output post-fixes
+
+    /// GigaAM иногда ставит точку, не подняв заглавную следующего слова
+    /// («Маркета. при запросе») — противоречивая граница, слабый сигнал модели
+    /// (правило обкатано на RUPunct: настоящая граница = точка + заглавная).
+    /// Точку перед строчной буквой убираем; «?»/«!» не трогаем.
+    static func dropInconsistentBoundaries(_ s: String) -> String {
+        var words = s.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        guard words.count > 1 else { return s }
+        for i in 0..<(words.count - 1) {
+            let w = words[i]
+            guard w.count >= 2, w.hasSuffix(".") || w.hasSuffix("…") else { continue }
+            guard let next = words[i + 1].first, next.isLetter, next.isLowercase else { continue }
+            var trimmed = w
+            while trimmed.hasSuffix(".") || trimmed.hasSuffix("…") { trimmed.removeLast() }
+            if !trimmed.isEmpty { words[i] = trimmed }
+        }
+        return words.joined(separator: " ")
     }
 
     // MARK: - Unit-symbol artifacts
