@@ -150,6 +150,7 @@ final class AppController: ObservableObject {
     func warmUpIfNeeded() {
         ensureActiveEngineLoaded()
         if settings.punctuationModel { RUPunctService.shared.ensureLoaded() }
+        if settings.sageCorrector { SageCorrectorService.shared.ensureLoaded() }
     }
 
     /// Load whichever engine is currently selected (WhisperKit or Parakeet).
@@ -368,6 +369,11 @@ final class AppController: ObservableObject {
             if self.settings.punctuationModel && self.settings.sttEngine != .gigaAM {
                 rawText = await RUPunctService.shared.punctuate(rawText)
             }
+            // Нейро-исправление ошибок (opt-in) — после восстановления пунктуации,
+            // до словаря правок в finalize (правки пользователя приоритетнее модели).
+            if self.settings.sageCorrector {
+                rawText = await SageCorrectorService.shared.correct(rawText)
+            }
             // Esc during transcription cancels this task — drop the result instead
             // of pasting into whatever field happens to be focused by now.
             if Task.isCancelled {
@@ -490,6 +496,9 @@ final class AppController: ObservableObject {
         }
         if settings.punctuationModel && settings.sttEngine != .gigaAM {
             raw = await RUPunctService.shared.punctuate(raw)
+        }
+        if settings.sageCorrector {
+            raw = await SageCorrectorService.shared.correct(raw)
         }
         return applyTextPipeline(raw)
     }

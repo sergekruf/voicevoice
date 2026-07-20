@@ -101,6 +101,11 @@ final class AppSettings: ObservableObject {
     /// for Parakeet (which omits punctuation on long audio); loads a ~56 МБ Core ML
     /// model on first use. Experimental.
     @AppStorage("punctuationModel") var punctuationModel: Bool = false
+    /// If true (default OFF, opt-in), fix recognition errors (spelling, punctuation,
+    /// casing) with the on-device sage-fredt5-95m seq2seq model (SberDevices, MIT).
+    /// Downloads ~230 МБ once on first enable. Runs after punctuation restore and
+    /// before the correction dictionary. Russian only. Experimental.
+    @AppStorage("sageCorrector") var sageCorrector: Bool = false
     /// If true (default ON), post-process Whisper's sentence-final punctuation
     /// with simple Russian rules: «ли»-particle and question-word starts force
     /// `?`; long sentences without question markers ending in `?` get `.`. See

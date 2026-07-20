@@ -44,6 +44,7 @@ struct SettingsView: View {
     @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
+    @ObservedObject private var sage = SageCorrectorService.shared
     @State private var inputDevices: [AudioInputDevice] = []
     @State private var defaultInputName: String = ""
 
@@ -192,6 +193,22 @@ struct SettingsView: View {
                         HelpHint(text: "Экспериментально. Расставляет знаки препинания и заглавные буквы нейросетевой моделью (RUPunct, ~56 МБ, целиком на устройстве) вместо набора правил. Особенно полезно для движка Parakeet, который на длинных записях не ставит знаки. Модель загружается в память при первом использовании. Когда включено — заменяет «Исправлять знаки в конце предложений». Работает только для русского.")
                     }
                 }
+                Toggle(isOn: $settings.sageCorrector) {
+                    HStack(spacing: 4) {
+                        Text("Нейро-исправление ошибок (модель)")
+                        HelpHint(text: "Экспериментально. Исправляет ошибки распознавания — опечатки, ослышки, пропущенные запятые и заглавные — нейросетью sage (SberDevices, 95 млн параметров, ~230 МБ, целиком на устройстве). Модель скачивается один раз при включении. Работает после нейро-пунктуации и до словаря правок, поэтому ваши правки из словаря имеют приоритет. Модель осторожная: если правка меняет текст слишком сильно (похоже на галлюцинацию), она отбрасывается и остаётся исходный текст. Добавляет ~0,1–0,5 с к обработке. Работает только для русского.")
+                    }
+                }
+                .onChange(of: settings.sageCorrector) { _, enabled in
+                    if enabled { SageCorrectorService.shared.ensureLoaded() }
+                }
+                if settings.sageCorrector, sage.state != .ready {
+                    Text("Модель исправления: \(sageStatus)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 20)
+                }
+
                 Toggle(isOn: $settings.fixPunctuation) {
                     HStack(spacing: 4) {
                         Text("Исправлять знаки в конце предложений")
@@ -310,6 +327,16 @@ struct SettingsView: View {
         case .downloading(let p): return "загрузка \(Int(p * 100))%"
         case .loading: return "инициализация"
         case .ready: return "готово"
+        case .error(let m): return "ошибка: \(m)"
+        }
+    }
+
+    private var sageStatus: String {
+        switch sage.state {
+        case .notLoaded: return "не загружена"
+        case .downloading(let p): return "скачивание \(Int(p * 100))%"
+        case .loading: return "инициализация"
+        case .ready: return "готова"
         case .error(let m): return "ошибка: \(m)"
         }
     }

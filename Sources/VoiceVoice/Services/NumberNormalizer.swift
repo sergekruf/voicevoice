@@ -85,6 +85,7 @@ enum NumberNormalizer {
         var total = 0          // accumulated value of completed scales (… тысяч, миллионов)
         var current = 0        // value being built below the next scale
         var count = 0          // number-tokens consumed
+        var digitTokens = 0    // из них — готовых цифровых групп («680», «000»)
         var lastConsumedIdx = startIdx - 1
         var firstWord: String? = nil
         // Value of the last cardinal WORD merged into `current`; nil after a digit
@@ -103,7 +104,7 @@ enum NumberNormalizer {
                 current = digits
                 lastWasDigits = true
                 lastCardinal = nil
-                count += 1; lastConsumedIdx = i; i += 1
+                count += 1; digitTokens += 1; lastConsumedIdx = i; i += 1
                 if firstWord == nil { firstWord = lower }
             } else if token.isWord, let v = numberWords[lower] {
                 if lastWasDigits { break }                    // «25 пять» — separate numbers
@@ -141,6 +142,11 @@ enum NumberNormalizer {
         guard count >= 1, lastConsumedIdx >= startIdx else { return nil }
         // Lone «один/одна/одно/одну» — leave as a word (article-like, not a quantity).
         if count == 1, let fw = firstWord, oneFormsToSkipAlone.contains(fw) { return nil }
+        // Одиночная ЦИФРОВАЯ группа без слов и множителей — уже готовое число,
+        // НЕ перерендериваем: String(Int) уничтожал ведущие нули («680 000» —
+        // группа «000» превращалась в «0», выходило «680 0»). Пробельные группы
+        // разрядов склеивает collapseThousandsSpaces, как и задумано.
+        if count == 1 && digitTokens == 1 { return nil }
         return (String(total + current), lastConsumedIdx + 1)
     }
 

@@ -25,6 +25,11 @@ final class AudioRecorder {
     private var buffer: [Float] = []
     private var ring: [Float] = []
     private let bufferQueue = DispatchQueue(label: "voicevoice.audio.buffer")
+    /// ВСЕ операции с AVAudioEngine — только на этой очереди и с таймаутом
+    /// (см. runEngineOp): зависший CoreAudio HAL (бесконечный опрос свойств внутри
+    /// AVAudioIOUnit — наблюдалось вживую) иначе замораживает главный поток
+    /// намертво: нажатия клавиши перестают обрабатываться, меню не открывается.
+    private let engineQueue = DispatchQueue(label: "voicevoice.audio.engine", qos: .userInitiated)
     var isRecording: Bool { bufferQueue.sync { mode == .recording } }
     var isWarmListening: Bool { bufferQueue.sync { mode == .warm } }
     private var configChangeObserver: NSObjectProtocol?
@@ -62,7 +67,9 @@ final class AudioRecorder {
             }
             DebugLog.log("Audio: instant start from warm engine (preRoll=\(preRoll) samples)")
         case .idle:
-            try startEngine()
+            // Холодный старт: до 4 с на инициализацию железа; таймаут вместо
+            // вечного зависания при заклинившем HAL.
+            try runEngineOp(timeout: 4) { try self.startEngineOnQueue() }
             bufferQueue.sync {
                 buffer.removeAll(keepingCapacity: true)
                 mode = .recording
@@ -93,8 +100,8 @@ final class AudioRecorder {
                 ring.removeAll(keepingCapacity: true)
             }
         } else {
-            stopEngine()
             bufferQueue.sync { mode = .idle }
+            engineQueue.async { [weak self] in self?.stopEngineOnQueue() }
         }
     }
 
@@ -109,7 +116,7 @@ final class AudioRecorder {
         let current = bufferQueue.sync { mode }
         guard current == .idle else { return }
         do {
-            try startEngine()
+            try runEngineOp(timeout: 4) { try self.startEngineOnQueue() }
             bufferQueue.sync {
                 ring.removeAll(keepingCapacity: true)
                 mode = .warm
@@ -125,17 +132,45 @@ final class AudioRecorder {
     func stopWarmListening() {
         let current = bufferQueue.sync { mode }
         guard current == .warm else { return }
-        stopEngine()
         bufferQueue.sync {
             mode = .idle
             ring.removeAll(keepingCapacity: true)
         }
+        engineQueue.async { [weak self] in self?.stopEngineOnQueue() }
         DebugLog.log("Audio: warm listening stopped")
     }
 
     // MARK: - Engine lifecycle
 
-    private func startEngine() throws {
+    /// Выполнить операцию с движком на engineQueue, ожидая не дольше `timeout`.
+    /// При таймауте бросает ошибку (пользователь получает .error и может повторить),
+    /// а вдогонку ставит в очередь уборку: если зависшая операция когда-нибудь
+    /// завершится и движок окажется запущенным при mode == .idle — гасим его,
+    /// чтобы микрофон не остался открытым «в никуда».
+    private func runEngineOp(timeout: TimeInterval, _ op: @escaping () throws -> Void) throws {
+        final class ErrorBox { var error: Error? }
+        let box = ErrorBox()
+        let sem = DispatchSemaphore(value: 0)
+        engineQueue.async {
+            do { try op() } catch { box.error = error }
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            DebugLog.log("Audio: engine op TIMED OUT (\(timeout)s) — аудиосистема не отвечает")
+            engineQueue.async { [weak self] in
+                guard let self else { return }
+                let idle = self.bufferQueue.sync { self.mode == .idle }
+                if idle && self.engine.isRunning { self.stopEngineOnQueue() }
+            }
+            throw NSError(domain: "VoiceVoice.Audio", code: 20, userInfo: [
+                NSLocalizedDescriptionKey: "Аудиосистема не отвечает — попробуйте ещё раз (если повторится — перезапустите приложение)",
+            ])
+        }
+        if let error = box.error { throw error }
+    }
+
+    /// Только с engineQueue.
+    private func startEngineOnQueue() throws {
         // If the user has picked a specific input device in Settings, route engine input
         // through it. Empty/stale UID = system default — which must be re-bound
         // EXPLICITLY: a previous run may have pinned the AUHAL to a specific device,
@@ -185,7 +220,8 @@ final class AudioRecorder {
         }
     }
 
-    private func stopEngine() {
+    /// Только с engineQueue.
+    private func stopEngineOnQueue() {
         removeConfigObserver()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
@@ -202,7 +238,9 @@ final class AudioRecorder {
     /// captured so far. A short gap during the switch is unavoidable; the
     /// alternative was losing everything after the switch silently.
     private func handleConfigurationChange() {
-        DispatchQueue.main.async { [weak self] in
+        // На engineQueue, не на main: работа с движком при заклинившем HAL не должна
+        // замораживать интерфейс.
+        engineQueue.async { [weak self] in
             guard let self else { return }
             let active = self.bufferQueue.sync { self.mode != .idle }
             guard active else { return }
