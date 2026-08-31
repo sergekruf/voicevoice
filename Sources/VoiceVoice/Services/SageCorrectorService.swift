@@ -347,11 +347,23 @@ final class SageCorrectorService: ObservableObject {
         return chunks
     }
 
+    /// Знаки, которых нет в BPE-словаре Sage осмысленным токеном: модель кодирует
+    /// их байт-фолбэком и на генерации «исправляет» в мусор («380 ₽» → «380 $*»,
+    /// «$$», «$$^» — наблюдалось вживую). GigaAM же выдаёт ₽ корректно.
+    /// «*» и «^» тоже здесь: в словаре GigaAM их нет вовсе — в оригинале они
+    /// не встречаются, а в правке могут быть только мусором генерации.
+    private static let protectedSigns: Set<Character> = ["₽", "€", "$", "%", "№", "*", "^"]
+
     /// Диф-гард: seq2seq теоретически может переписать текст — принимаем правку,
     /// только если буквенно-цифровое ядро изменилось умеренно (опечатки), а не
     /// переписано/оборвано (галлюцинация).
     static func acceptable(original: String, corrected: String?) -> Bool {
         guard let corrected, !corrected.isEmpty else { return false }
+        // Валютные и специальные знаки должны пережить правку один-в-один:
+        // потерялся или появился ₽/€/$/%/№ — вся правка чанка отклоняется.
+        let signsA = original.filter { protectedSigns.contains($0) }.sorted()
+        let signsB = corrected.filter { protectedSigns.contains($0) }.sorted()
+        guard signsA == signsB else { return false }
         let a = lettersDigits(original)
         let b = lettersDigits(corrected)
         guard !a.isEmpty, !b.isEmpty else { return false }

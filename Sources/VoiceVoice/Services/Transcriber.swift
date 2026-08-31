@@ -405,6 +405,12 @@ final class Transcriber: ObservableObject {
     private static let chunkCutoffSamples: Int = 13 * Int(AudioRecorder.targetSampleRate)
     /// Окно поиска тишины вокруг целевой границы (±2 секунды).
     private static let silenceSearchWindowSamples: Int = 2 * Int(AudioRecorder.targetSampleRate)
+    /// Насколько НАЗАД от целевой границы искать НАСТОЯЩУЮ паузу (≥0.5 с). Рез по
+    /// настоящей паузе — корректная граница предложения (точка и заглавная от движка
+    /// легитимны), а вынужденный рез посреди фразы рождает ложную заглавную на стыке
+    /// («…за каждую | Штуку»), которую склейка умеет снимать только у служебных слов.
+    /// Лучше кусок на несколько секунд короче, чем рез внутри предложения.
+    private static let pauseLookbackWindowSamples: Int = 5 * Int(AudioRecorder.targetSampleRate)
     /// Минимальная длина тишины (во VAD-фреймах по 0.1 с), чтобы принять её как точку
     /// реза. EnergyVAD ловит и одиночные 100-мс провалы энергии — это часто пауза
     /// ВНУТРИ слова (взрывные согласные, придыхание), рез по ней обрезает звук. Требуем
@@ -451,39 +457,72 @@ final class Transcriber: ObservableObject {
         return result
     }
 
-    /// Находит точку реза для чанка, начинающегося на `from`: целится в
-    /// `from + maxChunkSamples` и сдвигает рез в окне `±silenceSearchWindow`:
-    ///   1) если есть настоящая пауза (≥ minSilenceFrames) — режем по её середине,
-    ///      возвращаем `realPause = true` (граница предложения корректна);
-    ///   2) иначе — режем в САМОЙ ТИХОЙ точке окна (микропауза между словами), а не
-    ///      по слепому индексу `target`, и возвращаем `realPause = false` (рез внутри
-    ///      предложения — склейка потом уберёт ложную точку/заглавную).
+    /// Находит точку реза для чанка, начинающегося на `from`. Приоритет:
+    ///   1) ПОСЛЕДНЯЯ настоящая пауза (≥ realPauseMinFrames) в широком окне
+    ///      `[target − pauseLookback, target + silenceSearchWindow]` — корректная
+    ///      граница предложения, `realPause = true`. Берём последнюю, а не самую
+    ///      длинную: любая пауза ≥0.5 с — легитимная граница, а поздний рез =
+    ///      длиннее куски и меньше стыков;
+    ///   2) иначе — самая длинная короткая тишина (≥ minSilenceFrames) в узком окне
+    ///      `±silenceSearchWindow` — годная точка реза, но граница ложная;
+    ///   3) иначе — САМАЯ ТИХАЯ точка узкого окна (микропауза между словами), а не
+    ///      слепой индекс `target`.
+    /// На ложной границе (2 и 3) склейка потом уберёт ложную точку/заглавную.
     /// Гарантирует `from < cut <= limit`.
     static func findSilenceCut(in audio: [Float], from cursor: Int, upTo limit: Int, vad: EnergyVAD) -> (cut: Int, realPause: Bool) {
         let target = cursor + maxChunkSamples
-        let searchStart = max(cursor + maxChunkSamples - silenceSearchWindowSamples, cursor + 1)
-        let searchEnd = min(cursor + maxChunkSamples + silenceSearchWindowSamples, limit)
+
+        // Фаза 1: настоящая пауза в широком окне (с запасом назад от цели).
+        let wideStart = max(target - pauseLookbackWindowSamples, cursor + 1)
+        let wideEnd = min(target + silenceSearchWindowSamples, limit)
+        if wideEnd > wideStart {
+            let window = Array(audio[wideStart..<wideEnd])
+            let vadResult = vad.voiceActivity(in: window)
+            if let run = lastSilenceRun(in: vadResult, minFrames: realPauseMinFrames) {
+                let mid = run.startIndex + (run.endIndex - run.startIndex) / 2
+                let cutAt = wideStart + vad.voiceActivityIndexToAudioSampleIndex(mid)
+                return (min(max(cutAt, cursor + 1), limit), true)
+            }
+        }
+
+        // Фаза 2: настоящей паузы нет — прежнее поведение в узком окне вокруг цели.
+        let searchStart = max(target - silenceSearchWindowSamples, cursor + 1)
+        let searchEnd = min(target + silenceSearchWindowSamples, limit)
         var cutAt = target
-        var realPause = false
         if searchEnd > searchStart {
             let window = Array(audio[searchStart..<searchEnd])
             let vadResult = vad.voiceActivity(in: window)
             if let silence = vad.findLongestSilence(in: vadResult),
                silence.endIndex - silence.startIndex >= minSilenceFrames {
-                // Тишина ≥0.3 с → режем по её середине (макс. отступ от речи), но
-                // границей ПРЕДЛОЖЕНИЯ считаем только паузу ≥0.5 с — короткие
-                // заминки внутри фразы иначе оставляли ложную точку на стыке.
+                // Тишина 0.3–0.5 с → режем по её середине (макс. отступ от речи);
+                // паузы ≥0.5 с сюда не доходят — их забрала фаза 1.
                 let frames = silence.endIndex - silence.startIndex
                 let silenceMid = silence.startIndex + frames / 2
                 cutAt = searchStart + vad.voiceActivityIndexToAudioSampleIndex(silenceMid)
-                realPause = frames >= realPauseMinFrames
             } else {
-                // Сплошная речь без паузы → режем в самой тихой точке (стык слов/слогов),
-                // а не вслепую посреди слова.
                 cutAt = searchStart + lowestEnergyOffset(in: window)
             }
         }
-        return (min(max(cutAt, cursor + 1), limit), realPause)
+        return (min(max(cutAt, cursor + 1), limit), false)
+    }
+
+    /// Последний непрерывный участок тишины длиной ≥ `minFrames` во VAD-разметке
+    /// (true = речь). Участок, упирающийся в конец окна, тоже считается.
+    private static func lastSilenceRun(in vadResult: [Bool], minFrames: Int) -> (startIndex: Int, endIndex: Int)? {
+        var best: (startIndex: Int, endIndex: Int)? = nil
+        var runStart: Int? = nil
+        for (i, isVoice) in vadResult.enumerated() {
+            if !isVoice {
+                if runStart == nil { runStart = i }
+            } else if let s = runStart {
+                if i - s >= minFrames { best = (s, i) }
+                runStart = nil
+            }
+        }
+        if let s = runStart, vadResult.count - s >= minFrames {
+            best = (s, vadResult.count)
+        }
+        return best
     }
 
     /// Возвращает offset (в сэмплах от начала `window`) центра кадра 0.1 с с
@@ -525,6 +564,21 @@ final class Transcriber: ObservableObject {
         "которую", "которого", "котором", "которыми", "которому",
         "его", "ее", "их", "там", "тут", "здесь", "потом", "затем", "значит", "поэтому",
         "чтоб", "ну", "вот", "так",
+        // Местоимения, предлоги, наречия, частицы, числительные и связки —
+        // именем собственным не бывают, понижать безопасно.
+        "я", "ты", "мы", "вы", "он", "она", "оно", "они",
+        "меня", "тебя", "нас", "вас", "мне", "тебе", "нам", "вам",
+        "ему", "ей", "им", "ими", "себя", "себе",
+        "этот", "эта", "эти", "этим", "этом", "этих", "тот", "та", "те", "том", "тем",
+        "все", "всех", "всем", "вся", "всю", "всего",
+        "у", "без", "про", "через", "перед", "после", "между", "среди",
+        "возле", "около", "кроме", "вместо", "против",
+        "уже", "еще", "только", "даже", "просто", "сейчас", "теперь", "тогда",
+        "снова", "опять", "очень", "вообще", "кстати", "наверное", "например",
+        "однако", "либо", "пусть", "именно", "почти", "сразу", "дальше", "далее",
+        "один", "одна", "одно", "два", "две", "три", "четыре", "пять",
+        "шесть", "семь", "восемь", "девять", "десять", "оба", "обе",
+        "будет", "было", "были", "был", "есть", "нет", "надо", "нужно", "можно",
     ]
 
     /// Склеивает куски с учётом флага `realPauseAfter`:

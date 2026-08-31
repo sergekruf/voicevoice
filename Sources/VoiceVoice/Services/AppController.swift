@@ -222,14 +222,17 @@ final class AppController: ObservableObject {
         // Lazy load: ensure the model starts loading in the background while we record.
         // If the user holds Fn for several seconds, the model is usually ready by release.
         ensureActiveEngineLoaded()
+        // Мьют — ДО старта движка: смена состояния BT-вывода дёргает у запущенного
+        // AVAudioEngine конфигурацию (наблюдалось: мьют → configuration change через
+        // 1–5 мс) и вызывает лишний перезапуск захвата с потерей начала фразы.
+        if settings.muteSystemAudioOnRecord {
+            SystemAudioMuter.shared.mute()
+        }
         do {
             try recorder.start()
             state = .recording(level: 0)
             HUDManager.shared.showRecording()
             installEscMonitor()
-            if settings.muteSystemAudioOnRecord {
-                SystemAudioMuter.shared.mute()
-            }
             // Eager streaming: decode completed VAD chunks in the background while the
             // user keeps speaking, so on release only the trailing tail remains.
             // WhisperKit-only — Parakeet is fast enough and has no 223-token cap, so
@@ -255,6 +258,7 @@ final class AppController: ObservableObject {
                 })
             }
         } catch {
+            SystemAudioMuter.shared.restore()   // звук глушили до старта — вернуть
             state = .error(error.localizedDescription)
             hotkeys.resetPressState()   // keep the Caps Lock toggle in sync
             // Auto-recover: without this the state machine had no way out of .error

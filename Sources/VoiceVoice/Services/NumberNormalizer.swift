@@ -8,6 +8,9 @@ import Foundation
 ///   • `1 миллион 475632`  (mixed digit + word multiplier) → `1475632`.
 ///   • `1 425 689`  (thousand-separator spaces) → `1425689`.
 ///   • `6532.`  at end of an utterance → strip the trailing period.
+///   • Ordinals: `«с двадцать четвёртого по сороковой»` → `с 24-го по 40-й`
+///     (наращение по норме; перед месяцем — без него: `«первое сентября»` →
+///     `1 сентября`). Одиночные мелкие («первый раз») не трогаем.
 ///
 /// Transformations fire only inside a contiguous run of number-tokens (digits,
 /// cardinal words, scale words), so plain prose stays intact. A lone «один/одна/одно»
@@ -49,6 +52,80 @@ enum NumberNormalizer {
     /// Lone forms of «1» we deliberately DON'T digitize — almost always article-like.
     private static let oneFormsToSkipAlone: Set<String> = ["один", "одна", "одно", "одну"]
 
+    // MARK: - Ordinals («двадцать четвёртого» → «24-го»)
+
+    /// Основы порядковых числительных (ё уже приведена к е). Слово распознаётся
+    /// как порядковое, только если оно ЦЕЛИКОМ равно основа+окончание из
+    /// `ordinalEndings` — по префиксу не матчим («переводом», «шестерня» не влезут).
+    /// Сотые/тысячные намеренно отсутствуют: одиночные «сотый раз», «сотые доли» —
+    /// почти всегда обычная речь, а в составных («сто двадцать пятый») сотни
+    /// приходят количественным словом и финал всё равно за единицами/десятками.
+    private static let ordinalStems: [(stem: String, value: Int)] = [
+        ("одиннадцат", 11), ("двенадцат", 12), ("тринадцат", 13), ("четырнадцат", 14),
+        ("пятнадцат", 15), ("шестнадцат", 16), ("семнадцат", 17), ("восемнадцат", 18),
+        ("девятнадцат", 19), ("двадцат", 20), ("тридцат", 30), ("сороков", 40),
+        ("пятидесят", 50), ("шестидесят", 60), ("семидесят", 70), ("восьмидесят", 80),
+        ("девяност", 90),
+        ("перв", 1), ("втор", 2), ("четверт", 4), ("пят", 5), ("шест", 6),
+        ("седьм", 7), ("восьм", 8), ("девят", 9), ("десят", 10),
+    ]
+
+    /// Твёрдые адъективные окончания порядковых. Мягких («-им», «-ей»…) тут
+    /// сознательно нет: у твёрдых основ их не бывает, а их наличие ловило бы
+    /// глаголы вроде «вторим». «Третий» (единственная мягкая основа) — отдельно.
+    private static let ordinalEndings: Set<String> = [
+        "ый", "ой", "ая", "ое", "ую", "ого", "ому", "ым", "ом", "ые", "ых", "ыми",
+    ]
+
+    /// Все формы «третий» (мягкая основа — под общие окончания не подходит).
+    private static let thirdForms: Set<String> = [
+        "третий", "третья", "третье", "третьего", "третьей", "третьему",
+        "третьим", "третью", "третьи", "третьих", "третьими", "третьем",
+    ]
+
+    /// Перед названием месяца наращение не пишется: «девятнадцатое августа» →
+    /// «19 августа» (типографская норма дат).
+    private static let monthNames: Set<String> = [
+        "января", "февраля", "марта", "апреля", "мая", "июня",
+        "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    ]
+
+    /// Слово — порядковое числительное? Возвращает значение и наращение
+    /// («четвёртого» → (4, "го"), «сороковой» → (40, "й")).
+    private static func ordinalWord(_ word: String) -> (value: Int, suffix: String)? {
+        if thirdForms.contains(word) { return (3, ordinalSuffix(of: word)) }
+        for (stem, value) in ordinalStems where word.hasPrefix(stem) {
+            if ordinalEndings.contains(String(word.dropFirst(stem.count))) {
+                return (value, ordinalSuffix(of: word))
+            }
+        }
+        return nil
+    }
+
+    /// Наращение по норме Мильчина: одна буква, если предпоследняя буква слова —
+    /// гласная («сороковой» → «-й»), две — если согласная («четвёртого» → «-го»).
+    /// «ь» считаем за гласную ради форм «третья» → «-я».
+    private static func ordinalSuffix(of word: String) -> String {
+        let chars = Array(word)
+        guard chars.count >= 2 else { return "" }
+        let vowels: Set<Character> = ["а", "е", "и", "о", "у", "ы", "э", "ю", "я"]
+        let prev = chars[chars.count - 2]
+        if vowels.contains(prev) || prev == "ь" {
+            return String(chars[chars.count - 1])
+        }
+        return String(chars.suffix(2))
+    }
+
+    private static func followedByMonth(tokens: [Token], from idx: Int) -> Bool {
+        var j = idx
+        while j < tokens.count, !tokens[j].isWord {
+            guard tokens[j].text.allSatisfy({ $0.isWhitespace }) else { return false }
+            j += 1
+        }
+        guard j < tokens.count else { return false }
+        return monthNames.contains(tokens[j].text.lowercased().replacingOccurrences(of: "ё", with: "е"))
+    }
+
     /// Scale forms that MAY stand for «1×scale» with no numeral before them:
     /// «миллион рублей» = 1 000 000. Plural/genitive forms («тысячи людей»,
     /// «миллионов») without a numeral are plain prose, never a quantity.
@@ -88,6 +165,9 @@ enum NumberNormalizer {
         var digitTokens = 0    // из них — готовых цифровых групп («680», «000»)
         var lastConsumedIdx = startIdx - 1
         var firstWord: String? = nil
+        // Наращение порядкового финала («-го», «-й»); non-nil = ряд завершился
+        // порядковым числительным.
+        var ordinalSuffix: String? = nil
         // Value of the last cardinal WORD merged into `current`; nil after a digit
         // token or a scale word. Gates composition order.
         var lastCardinal: Int? = nil
@@ -118,6 +198,33 @@ enum NumberNormalizer {
                 lastCardinal = v
                 count += 1; lastConsumedIdx = i; i += 1
                 if firstWord == nil { firstWord = lower }
+            } else if token.isWord, let ord = ordinalWord(lower) {
+                // Порядковое всегда ЗАВЕРШАЕТ число: «двадцать четвёртого» → 24-го,
+                // «две тысячи двадцать пятый» → 2025-й.
+                if count == 0 {
+                    // Одиночное порядковое — цифрой только 10..99 («по сороковой» →
+                    // «по 40-й») или дата перед месяцем («первое сентября» →
+                    // «1 сентября»). «Первый раз», «сотый» — обычная речь.
+                    guard 10...99 ~= ord.value || followedByMonth(tokens: tokens, from: i + 1) else {
+                        return nil
+                    }
+                } else if let prev = lastCardinal {
+                    let composes = (prev >= 100 && ord.value < 100)
+                        || (prev >= 20 && prev <= 90 && 1...9 ~= ord.value)
+                    if !composes { break }
+                } else if lastWasDigits {
+                    // «20 четвёртого» (движок сам смешал цифры со словом) — чиним
+                    // только валидную композицию круглых десятков с единицами.
+                    let composes = 20...90 ~= current && current % 10 == 0 && 1...9 ~= ord.value
+                    if !composes { break }
+                } else if current != 0 {
+                    break
+                }
+                current += ord.value
+                ordinalSuffix = ord.suffix
+                count += 1; lastConsumedIdx = i; i += 1
+                if firstWord == nil { firstWord = lower }
+                break
             } else if token.isWord, let scale = scaleWords[lower] {
                 // Without a numeral before it, only «тысяча/миллион/…» (sing. nom./acc.)
                 // means a quantity; «тысячи людей», «миллионов» — plain prose.
@@ -147,7 +254,12 @@ enum NumberNormalizer {
         // группа «000» превращалась в «0», выходило «680 0»). Пробельные группы
         // разрядов склеивает collapseThousandsSpaces, как и задумано.
         if count == 1 && digitTokens == 1 { return nil }
-        return (String(total + current), lastConsumedIdx + 1)
+        var rendered = String(total + current)
+        if let suffix = ordinalSuffix, !suffix.isEmpty,
+           !followedByMonth(tokens: tokens, from: lastConsumedIdx + 1) {
+            rendered += "-" + suffix
+        }
+        return (rendered, lastConsumedIdx + 1)
     }
 
     // MARK: - Thousand-separator space collapse

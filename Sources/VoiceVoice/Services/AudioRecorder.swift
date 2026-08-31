@@ -247,6 +247,14 @@ final class AudioRecorder {
             DebugLog.log("Audio: engine configuration changed — restarting capture")
             let input = self.engine.inputNode
             input.removeTap(onBus: 0)
+            // После reconfigure AUHAL слетает на системный вход по умолчанию —
+            // выбранный в настройках микрофон нужно привязать заново, иначе захват
+            // молча уезжает на другое устройство (BT-гарнитура, 16 кГц HFP, с
+            // ожиданием смены профиля в сотни мс и нулями в буфере).
+            let chosenUID = AppSettings.shared.inputDeviceUID
+            if !chosenUID.isEmpty, let deviceID = AudioDevices.deviceID(forUID: chosenUID) {
+                try? self.setEngineInputDevice(deviceID)
+            }
             let inputFormat = input.inputFormat(forBus: 0)
             guard inputFormat.sampleRate > 0, let outFormat = self.converterOutputFormat else {
                 DebugLog.log("Audio: no usable input after config change — capture stalled")
