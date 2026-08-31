@@ -6,6 +6,7 @@ struct MenuBarContent: View {
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var updater = AppUpdater.shared
 
     private var engineState: Transcriber.ModelState {
         switch settings.sttEngine {
@@ -44,6 +45,11 @@ struct MenuBarContent: View {
         Button("Настройки…") { WindowOpener.openSettings() }
 
         Divider()
+
+        // Заголовок меняется по ходу обновления (проверка → скачивание N% →
+        // установка); свежее состояние видно при каждом открытии меню.
+        Button(updater.menuTitle) { updater.checkForUpdates() }
+            .disabled(updater.isBusy)
 
         Button("Выход") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")

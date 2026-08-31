@@ -8,6 +8,8 @@ import Foundation
 ///   • `1 миллион 475632`  (mixed digit + word multiplier) → `1475632`.
 ///   • `1 425 689`  (thousand-separator spaces) → `1425689`.
 ///   • `6532.`  at end of an utterance → strip the trailing period.
+///   • Halves: `«три с половиной на четыре метра»` → `3,5 на 4 метра`,
+///     `«полтора часа»` → `1,5 часа`.
 ///   • Ordinals: `«с двадцать четвёртого по сороковой»` → `с 24-го по 40-й`
 ///     (наращение по норме; перед месяцем — без него: `«первое сентября»` →
 ///     `1 сентября`). Одиночные мелкие («первый раз») не трогаем.
@@ -19,9 +21,30 @@ enum NumberNormalizer {
     static func normalize(_ text: String) -> String {
         var s = text
         s = convertNumbers(s)
+        s = convertHalves(s)
         s = collapseThousandsSpaces(s)
         s = stripTrailingPeriodAfterDigits(s)
         return s
+    }
+
+    // MARK: - Halves («3 с половиной» → «3,5», «полтора» → «1,5»)
+
+    /// «N с половиной» → «N,5» — движки (и convertNumbers выше) оцифровывают целую
+    /// часть, а «с половиной» оставляют словами. Требование цифры слева защищает
+    /// прозу («согласился с половиной условий» не трогается). Отдельно
+    /// «полтора/полторы/полутора» → «1,5» — это всегда количество; \b отсекает
+    /// «полтораста».
+    private static func convertHalves(_ s: String) -> String {
+        var t = s
+        if let re = try? NSRegularExpression(pattern: #"(\d+) с половиной"#) {
+            t = re.stringByReplacingMatches(in: t, range: NSRange(t.startIndex..., in: t),
+                                            withTemplate: "$1,5")
+        }
+        if let re = try? NSRegularExpression(pattern: #"\b[Пп]олтор[аы]\b|\b[Пп]олутора\b"#) {
+            t = re.stringByReplacingMatches(in: t, range: NSRange(t.startIndex..., in: t),
+                                            withTemplate: "1,5")
+        }
+        return t
     }
 
     // MARK: - Spelled-out number → digits

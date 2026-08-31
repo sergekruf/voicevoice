@@ -75,6 +75,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Скрытый отладочный режим: `VoiceVoice --update-test [install]` — проверка
+        // обновления без кликов по меню и без алертов (с `install` — полный цикл:
+        // скачивание DMG + установка в /Applications, БЕЗ перезапуска). Текущую
+        // версию можно подменить: VOICEVOICE_FAKE_VERSION=1.0.0.
+        if let idx = CommandLine.arguments.firstIndex(of: "--update-test") {
+            let doInstall = idx + 1 < CommandLine.arguments.count
+                && CommandLine.arguments[idx + 1] == "install"
+            Task { @MainActor in
+                do {
+                    let release = try await AppUpdater.fetchLatestRelease()
+                    let remote = AppUpdater.stripV(release.tag_name)
+                    let current = AppUpdater.shared.currentVersion
+                    let newer = AppUpdater.isNewer(remote, than: current)
+                    let dmg = release.assets.first(where: { $0.name == "VoiceVoice.dmg" })
+                    print("UPDATE-TEST current=\(current) latest=\(remote) newer=\(newer) dmg=\(dmg?.browser_download_url ?? "НЕТ")")
+                    if doInstall, newer, let dmg, let url = URL(string: dmg.browser_download_url) {
+                        try await AppUpdater.shared.downloadAndInstall(dmgURL: url, expectedVersion: remote)
+                        print("UPDATE-TEST INSTALLED \(remote) → /Applications (перезапуск пропущен)")
+                    }
+                    exit(0)
+                } catch {
+                    print("UPDATE-TEST FAILED: \(error.localizedDescription)")
+                    exit(1)
+                }
+            }
+            return
+        }
+
         // Touch the database singleton early so migrations run.
         _ = Database.shared
 
