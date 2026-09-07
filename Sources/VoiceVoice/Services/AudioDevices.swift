@@ -59,6 +59,43 @@ enum AudioDevices {
         return inputDevices().first(where: { $0.uid == uid })?.deviceID
     }
 
+    /// Транспорт устройства (kAudioDevicePropertyTransportType); 0 при ошибке.
+    static func transportType(_ id: AudioDeviceID) -> UInt32 {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr else { return 0 }
+        return value
+    }
+
+    static func isBluetooth(_ id: AudioDeviceID) -> Bool {
+        let t = transportType(id)
+        return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// Встроенный микрофон Мака (transport BuiltIn со входными каналами).
+    static func builtInInput() -> AudioInputDevice? {
+        inputDevices().first { transportType($0.deviceID) == kAudioDeviceTransportTypeBuiltIn }
+    }
+
+    /// Назначить системное устройство ввода по умолчанию.
+    @discardableResult
+    static func setDefaultInput(_ id: AudioDeviceID) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = id
+        return AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &value) == noErr
+    }
+
     // MARK: - Internal helpers
 
     private static func hasInputChannels(_ id: AudioDeviceID) -> Bool {

@@ -123,6 +123,11 @@ final class AppSettings: ObservableObject {
     /// ~1.5 с), нажатие клавиши стартует захват без задержки инициализации железа
     /// и прихватывает ~0.5 с ДО нажатия. Цена — постоянный индикатор микрофона macOS.
     @AppStorage("instantRecordStart") var instantRecordStart: Bool = true
+    /// «Не отдавать системный вход Bluetooth-наушникам»: когда macOS при
+    /// подключении BT-гарнитуры делает её микрофон системным входом, вернуть
+    /// вход на встроенный (или выбранный в настройках не-BT) микрофон — иначе
+    /// первое же приложение с микрофоном роняет звук наушников в HFP.
+    @AppStorage("guardSystemInput") var guardSystemInput: Bool = false
     /// Master switch — when true, ALL HUDs / toasts / overlays are suppressed:
     /// recording mic, result HUD, learned-correction toast, ready toast, model-loading
     /// indicator. Useful for screencasts, presentations, focused work.

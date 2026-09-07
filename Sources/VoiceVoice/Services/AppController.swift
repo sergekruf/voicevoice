@@ -110,6 +110,8 @@ final class AppController: ObservableObject {
         // микрофон, когда пользователь отошёл.
         recorder.startWarmListening()
         startWarmIdleWatch()
+        // Возврат системного входа, если его захватила BT-гарнитура (по настройке).
+        SystemInputGuard.shared.applySetting()
     }
 
     /// One-time backfill: lifetime counters were added after the app already had a
