@@ -8,6 +8,11 @@
 - Голосовые команды над буфером обмена (`⌥ Option` удержание → LLM-преобразование текста).
 - GitHub Actions для авто-сборки `.app` и `.dmg` по тегу `v*`.
 
+## [1.1.5] — 2026-09-07
+
+### Добавлено
+- **«Не отдавать системный вход Bluetooth-наушникам»** (Настройки → Микрофон, по умолчанию OFF): macOS при подключении BT-гарнитуры сама делает её микрофон системным входом, и первое же приложение, открывшее микрофон, роняет звук наушников из музыкального A2DP в телефонный HFP (16 кГц). Тумблер включает слежение за сменой системного входа: как только дефолтом становится Bluetooth-устройство, вход возвращается на встроенный микрофон (или выбранный в настройках, если тот не Bluetooth) — то, что раньше приходилось делать руками в System Settings → Sound. Для звонков через микрофон гарнитуры тумблер нужно выключить (подсказка предупреждает).
+
 ## [1.1.4] — 2026-08-31
 
 ### Добавлено
@@ -183,7 +188,8 @@
 - WhisperKit + CoreML/ANE
 - GRDB (SQLite-обёртка)
 
-[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.1.4...HEAD
+[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.1.5...HEAD
+[1.1.5]: https://github.com/sergekruf/voicevoice/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/sergekruf/voicevoice/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/sergekruf/voicevoice/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/sergekruf/voicevoice/compare/v1.1.1...v1.1.2
