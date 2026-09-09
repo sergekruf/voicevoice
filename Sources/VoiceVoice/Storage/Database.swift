@@ -54,6 +54,15 @@ final class Database {
                 t.column("createdAt", .datetime).notNull().indexed()
             }
         }
+        // Сырой выход движка ДО пост-обработки. Раньше в `rawText` попадал текст,
+        // уже прошедший нейро-пунктуацию, Sage и LLM, поэтому узнать, что именно
+        // исправила модель, было невозможно — а это главный источник кандидатов
+        // в словарь правок (см. HistoryMining). Пустая строка = старая запись.
+        migrator.registerMigration("v2_engineText") { db in
+            try db.alter(table: "transcriptions") { t in
+                t.add(column: "engineText", .text).notNull().defaults(to: "")
+            }
+        }
         try migrator.migrate(queue)
     }
 }

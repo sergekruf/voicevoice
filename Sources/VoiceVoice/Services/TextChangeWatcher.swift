@@ -358,7 +358,8 @@ final class TextChangeWatcher {
 
     /// D — «умный фильтр захвата»: учим пару только если она похожа на ошибку
     /// РАСПОЗНАВАНИЯ, а не на смысловую правку пользователя.
-    private func isLearnable(wrong: String, right: String) -> Bool {
+    /// internal ради отладочного прогона `VoiceVoice --learn-test`.
+    func isLearnable(wrong: String, right: String) -> Bool {
         let w = wrong.trimmingCharacters(in: .whitespacesAndNewlines)
         let r = right.trimmingCharacters(in: .whitespacesAndNewlines)
         if w.isEmpty || r.isEmpty { return false }
@@ -376,6 +377,17 @@ final class TextChangeWatcher {
         if wWords == 1, Self.stopWords.contains(w.lowercased().replacingOccurrences(of: "ё", with: "е")) {
             return false
         }
+        // Замена НОРМАЛЬНОГО слова словарю противопоказана: правило применяется ко
+        // всем будущим текстам без разбора контекста, поэтому «боты» → «бота» или
+        // «задаче» → «задачам» (правки под конкретную фразу) ломают любую другую
+        // фразу с этим словом. Именно так словарь и замусорился: 102 из 108 правил
+        // ни разу не применились, часть была вредной — см. DictionaryAudit.
+        // Исключение — нормализация названий («пеке» → «ПЭК»).
+        if DictionaryAudit.isRealRussian(w), !DictionaryAudit.looksLikeProperNameFix(wrong: w, right: r) {
+            DebugLog.log("Watcher: не учим «\(w)» → «\(r)» — «\(w)» обычное слово (контекстная правка)")
+            return false
+        }
+
         // Главный фильтр: похоже ли это на ошибку распознавания.
         return looksLikeRecognitionFix(w, r)
     }
