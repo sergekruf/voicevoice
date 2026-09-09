@@ -75,6 +75,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Скрытый отладочный режим: `VoiceVoice --mine-history` — печатает кандидатов
+        // в словарь из истории (то же, что кнопка «Разбор диктовок…»), плюс самотест
+        // извлечения пар на синтетике, т.к. у старых записей сырого текста нет.
+        if CommandLine.arguments.contains("--mine-history") {
+            let records = HistoryStore.shared.recent(limit: 500)
+            let withEngine = records.filter { !$0.engineText.isEmpty }
+            let candidates = HistoryMining.candidates(from: records,
+                                                      existing: CorrectionStore.shared.allOrdered())
+            print("MINE: записей \(records.count), с сырым текстом движка \(withEngine.count), кандидатов \(candidates.count)")
+            for c in candidates { print("  «\(c.wrong)» → «\(c.right)» ×\(c.count)  — \(c.example)") }
+
+            print("\n=== самотест извлечения пар ===")
+            let cases: [(String, String, String)] = [
+                ("Найди вотов по Ozon и дай ответ", "Найди ботов по Ozon и дай ответ", "вотов→ботов"),
+                ("Перейти в колонку и того", "Перейти в колонку итого", "и того→итого"),
+                ("Руководство по фронтенту", "Руководство по фронтенду", "фронтенту→фронтенду"),
+                ("Отправь отчёт сегодня", "Отправь отчёт сегодня.", "(только пунктуация — не берём)"),
+                ("по ещё каким-то задаче", "по ещё каким-то задачам", "(обычное слово — не берём)"),
+            ]
+            for (before, after, expect) in cases {
+                let pairs = HistoryMining.replacements(from: before, to: after)
+                    .filter { HistoryMining.isWorthLearning(wrong: $0.0, right: $0.1) }
+                let got = pairs.map { "\($0.0)→\($0.1)" }.joined(separator: ", ")
+                print("  ожидалось \(expect):  получено [\(got)]")
+            }
+            exit(0)
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --learn-test` — прогоняет контрольные
+        // пары через фильтр захвата автословаря (какие правки попадут в словарь).
+        if CommandLine.arguments.contains("--learn-test") {
+            let good = [("фрисовые", "флисовые"), ("обс", "ФБС"), ("клуд", "Клод"),
+                        ("валберес", "вайлдберриз"), ("влк", "в ЛК"), ("пеке", "ПЭК"),
+                        ("чпек", "jpg"), ("сейлеры", "селлеры"), ("здэк", "СДЭК"),
+                        ("клод код", "Claude Code")]
+            let bad = [("боты", "бота"), ("задаче", "задачам"), ("листа", "к листу"),
+                       ("упакуют", "пакуют"), ("обновить", "Обнови"), ("настроено", "настроен"),
+                       ("поехала", "поехало"), ("кода", "когда"), ("себе", "себес"),
+                       ("сегодняшние", "сегодняшнего"), ("аппаратном", "платном")]
+            let w = TextChangeWatcher.shared
+            var ok = 0
+            print("=== ДОЛЖНЫ учиться (ослышки) ===")
+            for (a, b) in good {
+                let learn = w.isLearnable(wrong: a, right: b)
+                if learn { ok += 1 }
+                print("  \(learn ? "учим  " : "ПРОПУСК") «\(a)» → «\(b)»")
+            }
+            print("=== НЕ должны учиться (контекстные правки) ===")
+            for (a, b) in bad {
+                let learn = w.isLearnable(wrong: a, right: b)
+                if !learn { ok += 1 }
+                print("  \(learn ? "УЧИМ!!" : "отсеян") «\(a)» → «\(b)»")
+            }
+            print("\nверно: \(ok)/\(good.count + bad.count)")
+            exit(0)
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --audit-dict` — печатает ревизию
+        // словаря правок (то же, что кнопка «Ревизия…») и выходит.
+        if CommandLine.arguments.contains("--audit-dict") {
+            let entries = CorrectionStore.shared.allOrdered()
+            let findings = DictionaryAudit.audit(entries)
+            print("AUDIT: правил \(entries.count), с замечаниями \(findings.count)")
+            for f in findings {
+                print("  «\(f.entry.wrong)» → «\(f.entry.right)» — \(f.reason)"
+                      + (f.neverUsed ? " · не применялось" : ""))
+            }
+            exit(0)
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --llm-test "текст"` — прогоняет текст
+        // через LLMEditorService (загрузка/скачивание модели, промпт, гарды) и
+        // завершается, минуя bootstrap. Сверка с прототипом `.mltools/eval_llm_editor.py`.
+        if let idx = CommandLine.arguments.firstIndex(of: "--llm-test"),
+           idx + 1 < CommandLine.arguments.count {
+            let text = CommandLine.arguments[idx + 1]
+            Task { @MainActor in
+                // Дождаться скачивания модели (correct() его не ждёт — в жизни
+                // диктовка не должна висеть минуты), иначе процесс выйдет раньше.
+                LLMEditorService.shared.ensureLoaded()
+                waiting: while true {
+                    switch LLMEditorService.shared.state {
+                    case .ready, .error: break waiting
+                    case .downloading(let p): print("LLM-TEST downloading \(Int(p * 100))%")
+                    default: break
+                    }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                var out = ""
+                for run in 1...2 {
+                    let t0 = Date()
+                    out = await LLMEditorService.shared.correct(text)
+                    print("LLM-TEST run \(run): \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+                }
+                print("LLM-TEST IN : \(text)")
+                print("LLM-TEST OUT: \(out)")
+                exit(0)
+            }
+            return
+        }
+
         // Скрытый отладочный режим: `VoiceVoice --update-test [install]` — проверка
         // обновления без кликов по меню и без алертов (с `install` — полный цикл:
         // скачивание DMG + установка в /Applications, БЕЗ перезапуска). Текущую

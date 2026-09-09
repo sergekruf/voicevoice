@@ -37,6 +37,15 @@ enum STTEngine: String, CaseIterable, Identifiable {
         case .gigaAM: return "GigaAM v3 (русский, эксперимент)"
         }
     }
+
+    /// Имя для подписей в интерфейсе, где длинное не помещается.
+    var shortName: String {
+        switch self {
+        case .whisperKit: return "Whisper"
+        case .parakeet: return "Parakeet"
+        case .gigaAM: return "GigaAM"
+        }
+    }
 }
 
 /// WhisperKit composes a folder-matching glob `*openai*{rawValue}/*` against
@@ -58,6 +67,27 @@ enum WhisperModelChoice: String, CaseIterable, Identifiable {
         case .largeV3: return "large-v3 (макс. качество, без turbo, ~1.5 ГБ)"
         case .medium: return "medium (~770 МБ)"
         case .small: return "small (~480 МБ)"
+        }
+    }
+}
+
+/// Как часто проверять словарь правок автоматически.
+enum DictionaryCheckSchedule: String, CaseIterable, Identifiable {
+    case off, daily, weekly
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .off: return "не проверять"
+        case .daily: return "раз в день"
+        case .weekly: return "раз в неделю"
+        }
+    }
+    var interval: TimeInterval? {
+        switch self {
+        case .off: return nil
+        case .daily: return 24 * 3600
+        case .weekly: return 7 * 24 * 3600
         }
     }
 }
@@ -106,6 +136,23 @@ final class AppSettings: ObservableObject {
     /// Downloads ~230 МБ once on first enable. Runs after punctuation restore and
     /// before the correction dictionary. Russian only. Experimental.
     @AppStorage("sageCorrector") var sageCorrector: Bool = false
+    /// «Глубокая чистка (LLM)»: Qwen3-1.7B через MLX правит ошибки распознавания по
+    /// контексту абзаца (омофоны, ослышки, потерянные точки, заглавные на стыках).
+    /// ~1 ГБ на диске, ~1.2 ГБ в памяти пока загружена, ~1 с на абзац — строго opt-in.
+    @AppStorage("llmEditor") var llmEditor: Bool = false
+    /// Через сколько минут без диктовок выгружать LLM из памяти (0 = никогда).
+    /// Обратно грузится на нажатии клавиши диктовки, во время записи.
+    @AppStorage("llmIdleUnloadMinutes") var llmIdleUnloadMinutes: Int = 10
+    /// Автопроверка словаря правок: ревизия (что пора удалить) + разбор диктовок
+    /// (что стоит добавить). Ничего не меняет сама — показывает тост с находками.
+    @AppStorage("dictionaryCheckSchedule") var dictionaryCheckScheduleRaw: String =
+        DictionaryCheckSchedule.weekly.rawValue
+    /// Когда проверка отработала в последний раз (Unix-время).
+    @AppStorage("lastDictionaryCheckAt") var lastDictionaryCheckAt: Double = 0
+
+    var dictionaryCheckSchedule: DictionaryCheckSchedule {
+        DictionaryCheckSchedule(rawValue: dictionaryCheckScheduleRaw) ?? .weekly
+    }
     /// If true (default ON), post-process Whisper's sentence-final punctuation
     /// with simple Russian rules: «ли»-particle and question-word starts force
     /// `?`; long sentences without question markers ending in `?` get `.`. See

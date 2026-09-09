@@ -45,8 +45,10 @@ struct SettingsView: View {
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
     @ObservedObject private var sage = SageCorrectorService.shared
+    @ObservedObject private var llm = LLMEditorService.shared
     @State private var inputDevices: [AudioInputDevice] = []
     @State private var defaultInputName: String = ""
+    @State private var lastCheckEmpty = false
 
     /// State of whichever engine is currently selected.
     private var activeState: Transcriber.ModelState {
@@ -208,14 +210,50 @@ struct SettingsView: View {
                         HelpHint(text: "Экспериментально. Исправляет ошибки распознавания — опечатки, ослышки, пропущенные запятые и заглавные — нейросетью sage (SberDevices, 95 млн параметров, ~230 МБ, целиком на устройстве). Модель скачивается один раз при включении. Работает после нейро-пунктуации и до словаря правок, поэтому ваши правки из словаря имеют приоритет. Модель осторожная: если правка меняет текст слишком сильно (похоже на галлюцинацию), она отбрасывается и остаётся исходный текст. Добавляет ~0,1–0,5 с к обработке. Работает только для русского.")
                     }
                 }
+                .disabled(settings.llmEditor)
                 .onChange(of: settings.sageCorrector) { _, enabled in
-                    if enabled { SageCorrectorService.shared.ensureLoaded() }
+                    if enabled && !settings.llmEditor { SageCorrectorService.shared.ensureLoaded() }
                 }
-                if settings.sageCorrector, sage.state != .ready {
+                if settings.llmEditor {
+                    Text("Неактивно: включена «Глубокая чистка (LLM)» — она делает то же самое с пониманием контекста, а ошибки Sage («референс» → «референдум») LLM исправить уже не может.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 20)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if settings.sageCorrector, sage.state != .ready {
                     Text("Модель исправления: \(sageStatus)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.leading, 20)
+                }
+                Toggle(isOn: $settings.llmEditor) {
+                    HStack(spacing: 4) {
+                        Text("Глубокая чистка (LLM, модель ~1 ГБ)")
+                        HelpHint(text: "Экспериментально. Языковая модель Qwen3-1.7B (целиком на устройстве, через Metal) перечитывает распознанный текст с пониманием смысла и чинит то, что не видят движок и «Нейро-исправление»: омофоны («колонку и того» → «итого»), ослышки («вотов» → «ботов»), пропущенные точки перед новым предложением. Модель ~1 ГБ скачивается один раз при включении и занимает ~1,2 ГБ памяти, пока загружена (по простою выгружается — см. ниже); добавляет ~1 с к обработке каждой диктовки. Модель осторожная: меняет слово только на созвучное, стиль и латиницу не трогает, при малейшем сомнении оставляет как есть; подозрительные правки отбрасываются. Работает после «Нейро-исправления» и до словаря правок. Только русский.")
+                    }
+                }
+                .onChange(of: settings.llmEditor) { _, enabled in
+                    if enabled { LLMEditorService.shared.ensureLoaded() } else { LLMEditorService.shared.unload() }
+                }
+                if settings.llmEditor, llm.state != .ready {
+                    Text("Модель LLM: \(llmStatus)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 20)
+                }
+                if settings.llmEditor {
+                    Picker(selection: $settings.llmIdleUnloadMinutes) {
+                        Text("через 5 минут").tag(5)
+                        Text("через 10 минут").tag(10)
+                        Text("через 30 минут").tag(30)
+                        Text("никогда").tag(0)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Выгружать LLM из памяти при простое")
+                            HelpHint(text: "Модель нужна только в момент диктовки. Если диктовок не было указанное время, она выгружается и приложение занимает ~30 МБ; при следующем нажатии клавиши диктовки загружается заново прямо во время записи (~1 с) — обычно к отпусканию клавиши уже готова. «Никогда» — держать в памяти постоянно (~1,2 ГБ).")
+                        }
+                    }
+                    .padding(.leading, 20)
                 }
 
                 Toggle(isOn: $settings.fixPunctuation) {
@@ -251,6 +289,26 @@ struct SettingsView: View {
                             .monospacedDigit()
                             .frame(width: 44, alignment: .trailing)
                     }
+                }
+                Picker(selection: $settings.dictionaryCheckScheduleRaw) {
+                    ForEach(DictionaryCheckSchedule.allCases) { s in
+                        Text(s.displayName).tag(s.rawValue)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Проверять словарь автоматически")
+                        HelpHint(text: "По расписанию приложение само выполняет «Ревизию…» (какие правила стоит убрать: замены обычных слов, дубликаты, отклонённые) и «Разбор диктовок…» (какие исправления повторяются и просятся в словарь), после чего показывает уведомление с числом находок. Ничего не удаляется и не добавляется без вашего подтверждения — открыть список можно кнопкой в уведомлении или в окне «Словарь правок». В тихом режиме уведомление не показывается.")
+                    }
+                }
+                HStack {
+                    Button("Проверить сейчас") {
+                        let r = AppController.shared.runDictionaryCheck()
+                        if r.audit == 0 && r.candidates == 0 { lastCheckEmpty = true }
+                    }
+                    if lastCheckEmpty {
+                        Text("замечаний нет").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
                 }
                 Stepper(value: $settings.minConfirmedToApply, in: 1...10) {
                     HStack {
@@ -336,6 +394,16 @@ struct SettingsView: View {
         case .downloading(let p): return "загрузка \(Int(p * 100))%"
         case .loading: return "инициализация"
         case .ready: return "готово"
+        case .error(let m): return "ошибка: \(m)"
+        }
+    }
+
+    private var llmStatus: String {
+        switch llm.state {
+        case .notLoaded: return "не загружена"
+        case .downloading(let p): return "скачивание \(Int(p * 100))% (~1 ГБ)"
+        case .loading: return "инициализация"
+        case .ready: return "готова"
         case .error(let m): return "ошибка: \(m)"
         }
     }

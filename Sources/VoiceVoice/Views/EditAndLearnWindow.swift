@@ -56,7 +56,9 @@ struct EditAndLearnView: View {
                     .foregroundStyle(.secondary)
             }
 
-            GroupBox("Исходное распознавание (Whisper)") {
+            // Движок подставляем текущий: в записи истории он не сохраняется, а
+            // подпись «(Whisper)» была захардкожена и врала всем, кто выбрал другой.
+            GroupBox("Исходное распознавание (\(AppSettings.shared.sttEngine.shortName))") {
                 ScrollView { Text(record.rawText).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading) }
                     .frame(maxHeight: 80)
             }

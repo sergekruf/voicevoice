@@ -71,7 +71,7 @@ struct DashboardView: View {
                     HStack(spacing: 12) {
                         StatCard(title: "База данных", value: byteString(dbBytes),
                                  icon: "cylinder", subtitle: "история + словарь")
-                        StatCard(title: "Модель Whisper", value: byteString(modelsBytes),
+                        StatCard(title: "Модель \(AppSettings.shared.sttEngine.shortName)", value: byteString(modelsBytes),
                                  icon: "cpu", subtitle: settings.modelName)
                         StatCard(title: "Итого", value: byteString(dbBytes + modelsBytes), icon: "internaldrive")
                     }

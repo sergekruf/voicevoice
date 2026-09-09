@@ -112,6 +112,55 @@ final class AppController: ObservableObject {
         startWarmIdleWatch()
         // Возврат системного входа, если его захватила BT-гарнитура (по настройке).
         SystemInputGuard.shared.applySetting()
+        // LLM-модель тяжёлая (загрузка секунды + прогрев): если тумблер включён,
+        // поднимаем сразу, чтобы первая диктовка не ждала.
+        if settings.llmEditor { LLMEditorService.shared.ensureLoaded() }
+        LLMEditorService.shared.startIdleWatch()
+        startDictionaryCheckWatch()
+    }
+
+    // MARK: - Автопроверка словаря
+
+    /// Ревизия словаря + разбор диктовок по расписанию из настроек. Сама ничего не
+    /// меняет: находки показываются тостом, решение — за пользователем (авто-
+    /// пополнение словаря однажды уже намусорило, см. DictionaryAudit).
+    private var dictionaryCheckTimer: Timer?
+
+    private func startDictionaryCheckWatch() {
+        dictionaryCheckTimer?.invalidate()
+        // Раз в полчаса сверяемся с расписанием: на минутные интервалы точность не нужна.
+        dictionaryCheckTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickDictionaryCheck() }
+        }
+        // Первый прогон — через минуту после старта, чтобы не мешать запуску.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+            self?.tickDictionaryCheck()
+        }
+    }
+
+    private func tickDictionaryCheck() {
+        guard let interval = settings.dictionaryCheckSchedule.interval else { return }
+        let last = settings.lastDictionaryCheckAt
+        // Первый запуск после включения настройки не должен срабатывать мгновенно.
+        if last == 0 {
+            settings.lastDictionaryCheckAt = Date().timeIntervalSince1970
+            return
+        }
+        guard Date().timeIntervalSince1970 - last >= interval else { return }
+        if case .recording = state { return }
+        runDictionaryCheck()
+    }
+
+    /// Прогон проверки (используется расписанием и кнопкой «Проверить сейчас»).
+    @discardableResult
+    func runDictionaryCheck() -> (audit: Int, candidates: Int) {
+        settings.lastDictionaryCheckAt = Date().timeIntervalSince1970
+        let entries = corrections.allOrdered()
+        let audit = DictionaryAudit.audit(entries)
+        let candidates = HistoryMining.candidates(from: history.recent(limit: 500), existing: entries)
+        DebugLog.log("DictCheck: замечаний \(audit.count), кандидатов \(candidates.count)")
+        HUDManager.shared.showDictionaryCheck(auditCount: audit.count, candidateCount: candidates.count)
+        return (audit.count, candidates.count)
     }
 
     /// One-time backfill: lifetime counters were added after the app already had a
@@ -152,7 +201,8 @@ final class AppController: ObservableObject {
     func warmUpIfNeeded() {
         ensureActiveEngineLoaded()
         if settings.punctuationModel { RUPunctService.shared.ensureLoaded() }
-        if settings.sageCorrector { SageCorrectorService.shared.ensureLoaded() }
+        if settings.sageCorrector && !settings.llmEditor { SageCorrectorService.shared.ensureLoaded() }
+        if settings.llmEditor { LLMEditorService.shared.ensureLoaded() }
     }
 
     /// Load whichever engine is currently selected (WhisperKit or Parakeet).
@@ -224,6 +274,8 @@ final class AppController: ObservableObject {
         // Lazy load: ensure the model starts loading in the background while we record.
         // If the user holds Fn for several seconds, the model is usually ready by release.
         ensureActiveEngineLoaded()
+        // LLM могла быть выгружена по простою — поднимаем, пока идёт запись (~1 с).
+        if settings.llmEditor { LLMEditorService.shared.ensureLoaded() }
         // Мьют — ДО старта движка: смена состояния BT-вывода дёргает у запущенного
         // AVAudioEngine конфигурацию (наблюдалось: мьют → configuration change через
         // 1–5 мс) и вызывает лишний перезапуск захвата с потерей начала фразы.
@@ -369,6 +421,10 @@ final class AppController: ObservableObject {
             case .gigaAM:
                 rawText = await GigaAMTranscriber.shared.transcribe(audio: samples)
             }
+            // Сырой выход движка запоминаем до всей пост-обработки: по нему потом
+            // видно, что исправили модели, и из повторяющихся правок рождаются
+            // кандидаты в словарь (HistoryMining).
+            let engineText = rawText
             // Neural punctuation/casing restoration (opt-in) — on the raw STT text,
             // before the rest of the pipeline; replaces the regex PunctuationFixer.
             // GigaAM e2e расставляет знаки сам — RUPunct поверх только навредит.
@@ -377,8 +433,17 @@ final class AppController: ObservableObject {
             }
             // Нейро-исправление ошибок (opt-in) — после восстановления пунктуации,
             // до словаря правок в finalize (правки пользователя приоритетнее модели).
-            if self.settings.sageCorrector {
+            // Sage пропускается при включённой LLM: он идёт первым, а его перевирания
+            // («референс» → «референдум») LLM откатить не может — пословный гард
+            // разрешает менять слово не больше чем на две буквы.
+            if self.settings.sageCorrector && !self.settings.llmEditor {
                 rawText = await SageCorrectorService.shared.correct(rawText)
+            }
+            // Глубокая чистка LLM (opt-in) — последний нейро-шаг, видит контекст
+            // всего абзаца; после Sage, до словаря правок (правки пользователя
+            // приоритетнее модели).
+            if self.settings.llmEditor {
+                rawText = await LLMEditorService.shared.correct(rawText)
             }
             // Esc during transcription cancels this task — drop the result instead
             // of pasting into whatever field happens to be focused by now.
@@ -393,12 +458,14 @@ final class AppController: ObservableObject {
                     ? ParakeetTranscriber.shared.lastProcessingMs
                     : self.transcriber.lastProcessingMs
                 DebugLog.log("App: transcribe finished, rawLen=\(rawText.count) text=\(rawText.prefix(80))")
-                self.finalize(rawText: rawText, duration: duration, processingMs: procMs)
+                self.finalize(rawText: rawText, engineText: engineText,
+                              duration: duration, processingMs: procMs)
             }
         }
     }
 
-    private func finalize(rawText: String, duration: Double, processingMs: Int) {
+    private func finalize(rawText: String, engineText: String = "",
+                          duration: Double, processingMs: Int) {
         let applyResult = applier.apply(to: rawText)
         let dictText = applyResult.text
         var appliedText = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
@@ -417,6 +484,7 @@ final class AppController: ObservableObject {
         }
 
         var record = TranscriptionRecord(
+            engineText: engineText,
             rawText: rawText,
             appliedText: appliedText,
             finalText: appliedText,
@@ -503,8 +571,11 @@ final class AppController: ObservableObject {
         if settings.punctuationModel && settings.sttEngine != .gigaAM {
             raw = await RUPunctService.shared.punctuate(raw)
         }
-        if settings.sageCorrector {
+        if settings.sageCorrector && !settings.llmEditor {
             raw = await SageCorrectorService.shared.correct(raw)
+        }
+        if settings.llmEditor {
+            raw = await LLMEditorService.shared.correct(raw)
         }
         return applyTextPipeline(raw)
     }
@@ -529,6 +600,10 @@ final class AppController: ObservableObject {
     func commitEdit(recordId: Int64, raw: String, applied: String, final: String,
                     autoApplied: [AppliedSubstitution]) {
         history.updateFinal(id: recordId, finalText: final)
+        // Окна «История» и «Словарь правок» читают базу один раз при открытии, поэтому
+        // после правки из отдельного окна Edit & Learn они показывали старый текст —
+        // выглядело так, будто «Сохранить и обучить» ничего не сделала.
+        defer { NotificationCenter.default.post(name: .voiceVoiceDataDidChange, object: nil) }
 
         let appliedRollup: [(wrong: String, right: String, context: String?)] =
             autoApplied.map { ($0.wrong, $0.right, $0.context) }
@@ -558,6 +633,11 @@ final class AppController: ObservableObject {
 }
 
 import AVFoundation
+
+extension Notification.Name {
+    /// История и/или словарь правок изменились — открытым окнам нужно перечитать базу.
+    static let voiceVoiceDataDidChange = Notification.Name("voiceVoiceDataDidChange")
+}
 
 enum AVAuthStatus {
     static var audio: AVAuthorizationStatus {

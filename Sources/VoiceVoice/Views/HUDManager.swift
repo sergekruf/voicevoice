@@ -11,6 +11,7 @@ final class HUDManager {
     private var resultDismissTask: DispatchWorkItem?
 
     private var learnedPanel: NSPanel?
+    private var dictionaryCheckPanel: NSPanel?
     private var learnedDismissTask: DispatchWorkItem?
 
     private var loadingPanel: NSPanel?
@@ -73,6 +74,21 @@ final class HUDManager {
         }
         // 6s (vs 4s for passive toasts) — the toast is now interactive, give time to react.
         present(view: LearnedToast(corrections: corrections, onUndo: onUndo), ref: &learnedPanel, size: NSSize(width: 520, height: height), autohide: 6.0)
+    }
+
+    /// Итог автопроверки словаря (по расписанию из настроек).
+    func showDictionaryCheck(auditCount: Int, candidateCount: Int) {
+        if isQuiet { return }
+        guard auditCount > 0 || candidateCount > 0 else { return }
+        let rows = (auditCount > 0 ? 1 : 0) + (candidateCount > 0 ? 1 : 0)
+        let onOpen: () -> Void = { [weak self] in
+            WindowOpener.openDictionary()
+            self?.dictionaryCheckPanel?.orderOut(nil)
+        }
+        present(view: DictionaryCheckToast(auditCount: auditCount,
+                                           candidateCount: candidateCount, onOpen: onOpen),
+                ref: &dictionaryCheckPanel,
+                size: NSSize(width: 520, height: CGFloat(52 + rows * 20)), autohide: 8.0)
     }
 
     // MARK: - Model loading

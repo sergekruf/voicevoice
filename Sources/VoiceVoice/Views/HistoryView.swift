@@ -19,6 +19,14 @@ struct HistoryView: View {
                     Text(r.preview).font(.system(size: 12))
                 }
             }
+            // Двойной клик по строке открывает правку (штатный primaryAction таблицы),
+            // правый клик — то же меню, что и кнопки под списком.
+            .contextMenu(forSelectionType: TranscriptionRecord.ID.self) { ids in
+                Button("Открыть в Edit & Learn") { open(ids) }
+                Button("Удалить", role: .destructive) { delete(ids) }
+            } primaryAction: { ids in
+                open(ids)
+            }
             HStack {
                 Button("Открыть в Edit & Learn") { openSelected() }
                     .disabled(selection == nil)
@@ -30,18 +38,28 @@ struct HistoryView: View {
         }
         .padding(12)
         .onAppear { reload() }
+        .onReceive(NotificationCenter.default.publisher(for: .voiceVoiceDataDidChange)) { _ in
+            reload()
+        }
     }
 
     private func reload() {
         records = HistoryStore.shared.recent(limit: 200)
     }
-    private func openSelected() {
-        guard let id = selection, let r = records.first(where: { $0.id == id }) else { return }
+    private func openSelected() { open(selection.map { [$0] } ?? []) }
+    private func deleteSelected() { delete(selection.map { [$0] } ?? []) }
+
+    private func open(_ ids: Set<TranscriptionRecord.ID>) { open(Array(ids)) }
+    private func delete(_ ids: Set<TranscriptionRecord.ID>) { delete(Array(ids)) }
+
+    private func open(_ ids: [TranscriptionRecord.ID]) {
+        guard let id = ids.first, let r = records.first(where: { $0.id == id }) else { return }
         EditAndLearnController.shared.open(record: r)
     }
-    private func deleteSelected() {
-        guard let id = selection, let r = records.first(where: { $0.id == id }) else { return }
-        HistoryStore.shared.delete(r)
+    private func delete(_ ids: [TranscriptionRecord.ID]) {
+        let doomed = records.filter { ids.contains($0.id) }
+        guard !doomed.isEmpty else { return }
+        for r in doomed { HistoryStore.shared.delete(r) }
         reload()
     }
 }
