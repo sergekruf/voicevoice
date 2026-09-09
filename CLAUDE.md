@@ -35,6 +35,7 @@
 
 ```bash
 ./setup-signing.sh   # одноразово: self-signed identity "VoiceVoiceDev" (стабильные TCC-permissions)
+.mltools/fetch_mlx_metallib.sh   # одноразово / при смене версии mlx-swift: Metal-ядра MLX (см. ниже)
 ./build-app.sh       # swift build (release, arm64) → build/VoiceVoice.app → codesign
 open build/VoiceVoice.app
 ./make-dmg.sh        # опционально: .dmg
@@ -51,6 +52,16 @@ open build/VoiceVoice.app
 - История изменений подробно ведётся в `CHANGELOG.md` (Keep a Changelog, на русском).
 
 ## Особенности и грабли
+
+- **MLX (LLM-постредактор) и Metal-ядра**: `swift build` НЕ компилирует `.metal`-шейдеры mlx-swift
+  (по README пакета это умеет только Xcode/xcodebuild + отдельный Metal Toolchain в Xcode 26).
+  Обход: `.mltools/fetch_mlx_metallib.sh` берёт готовый `mlx.metallib` из официального PyPI-колеса
+  `mlx-metal` той же версии ядра (читает её из `.build/checkouts/mlx-swift/.../version.h`) и кладёт
+  как `.mltools/mlx-swift_Cmlx.bundle/default.metallib`; `build-app.sh` копирует бандл в
+  `Contents/Resources` — именно там MLX его ищет. Без него первое обращение к MLX падает с
+  «Failed to load the default metallib». Для CLI-тестов из `.build` — положить `mlx.metallib`
+  рядом с бинарником. Зависимость — `mlx-swift-lm` (НЕ `mlx-swift-examples`: тот требует
+  swift-transformers 1.0.x/1.3+ и конфликтует с WhisperKit 0.18 ↔ swift-transformers 1.1.x).
 
 - **iCloud ломает codesign**: проект лежит в ~/Documents (iCloud внедряет xattr), поэтому
   `build-app.sh` собирает бандл в `/tmp` и только потом переносит через `ditto`. Не менять эту схему.

@@ -42,6 +42,17 @@ for r in "$BIN_DIR"/*.bundle; do
     [[ -d "$r" ]] && cp -R "$r" "$APP_DIR/Contents/Resources/"
 done
 
+# Metal-ядра MLX (LLM-постредактор). `swift build` их не компилирует — готовый
+# metallib берётся из колеса mlx-metal той же версии ядра, см.
+# .mltools/fetch_mlx_metallib.sh. Без него MLX падает на первом обращении
+# («Failed to load the default metallib»), поэтому отсутствие — ошибка сборки.
+MLX_BUNDLE="$PROJECT_DIR/.mltools/mlx-swift_Cmlx.bundle"
+if [[ ! -f "$MLX_BUNDLE/default.metallib" ]]; then
+    echo "❌ Нет $MLX_BUNDLE/default.metallib — запустите .mltools/fetch_mlx_metallib.sh"
+    exit 1
+fi
+cp -R "$MLX_BUNDLE" "$APP_DIR/Contents/Resources/"
+
 printf "APPL????" > "$APP_DIR/Contents/PkgInfo"
 
 # Belt-and-suspenders: clear any xattrs the copy may have carried.

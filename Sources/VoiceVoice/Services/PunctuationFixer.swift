@@ -63,6 +63,55 @@ enum PunctuationFixer {
         return result
     }
 
+    // MARK: - Сочинительные союзы в начале предложения
+
+    /// «…маржинальность. Но покупатель увидит…» → «…маржинальность, но покупатель
+    /// увидит…». Движки (у GigaAM пунктуация встроенная) ставят точку по паузе в
+    /// речи, и длинная мысль рассыпается на рубленые предложения с «А», «Но», «И»
+    /// в начале. Запятая перед сочинительным союзом обязательна по правилам, так
+    /// что склейка грамматически безопасна — вопрос только меры, поэтому:
+    ///   • склеиваем лишь после точки (после «?» и «!» интонация другая);
+    ///   • результат не длиннее `maxMergedLength` — иначе абзац станет монстром;
+    ///   • к уже склеенному предложению третье не присоединяем.
+    /// LLM это правило выполнять отказалась даже с примером в промпте (проверено на
+    /// Qwen3-1.7B), поэтому шаг детерминированный.
+    private static let maxMergedLength = 220
+    private static let coordinatingConjunctions: Set<String> = ["а", "но", "и"]
+
+    static func mergeCoordinatingClauses(_ text: String) -> String {
+        let sentences = splitSentencesPreservingTrailingSpace(text)
+        guard sentences.count > 1 else { return text }
+        var out: [String] = []
+        var lastWasMerged = false
+        for sentence in sentences {
+            let trimmed = sentence.trimmingCharacters(in: .whitespaces)
+            guard var prev = out.last, !lastWasMerged,
+                  let firstWord = trimmed.split(separator: " ").first,
+                  coordinatingConjunctions.contains(String(firstWord).lowercased()),
+                  firstWord.first?.isUppercase == true,
+                  prev.trimmingCharacters(in: .whitespaces).hasSuffix("."),
+                  prev.count + trimmed.count <= maxMergedLength
+            else {
+                out.append(sentence)
+                lastWasMerged = false
+                continue
+            }
+            // Снимаем точку у предыдущего, союз пишем со строчной, хвостовой
+            // пробел исходного предложения сохраняем.
+            while let last = prev.last, last.isWhitespace { prev.removeLast() }
+            while prev.hasSuffix(".") { prev.removeLast() }
+            var tail = ""
+            for ch in sentence.reversed() {
+                guard ch.isWhitespace else { break }
+                tail.append(ch)
+            }
+            let lowered: String = trimmed.prefix(1).lowercased() + trimmed.dropFirst()
+            out[out.count - 1] = prev + ", " + lowered + tail
+            lastWasMerged = true
+        }
+        return out.joined()
+    }
+
     // MARK: - Per-sentence
 
     private static func fixSentence(_ sent: String) -> String {
