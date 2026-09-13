@@ -36,6 +36,8 @@ final class LLMEditorService: ObservableObject {
     @Published private(set) var lastProcessingMs: Int = 0
 
     private var container: ModelContainer?
+    /// Приписка к запросу, выключающая режим рассуждений (зависит от модели).
+    private var noThinkSuffix = " /no_think"
     private var loadingTask: Task<Void, Never>?
 
     private struct Err: LocalizedError { let m: String; var errorDescription: String? { m } }
@@ -58,7 +60,18 @@ final class LLMEditorService: ObservableObject {
     ]
 
     static var modelDir: URL {
-        AppPaths.appSupportDir.appendingPathComponent("models/LLM/Qwen3-1.7B-4bit")
+        // Отладка: сравнение моделей скриптами `.mltools/cmp/` — боевой путь на другой
+        // папке модели (те же имена файлов, скачивание и проверка сумм пропускаются).
+        if let dir = ProcessInfo.processInfo.environment["VOICEVOICE_LLM_MODEL_DIR"], !dir.isEmpty {
+            return URL(fileURLWithPath: dir)
+        }
+        return AppPaths.appSupportDir.appendingPathComponent("models/LLM/Qwen3-1.7B-4bit")
+    }
+
+    /// Папка модели подменена отладочной переменной — скачивание не запускаем:
+    /// у другой модели свой набор файлов, и докачка файлов Qwen испортила бы папку.
+    static var modelDirOverridden: Bool {
+        !(ProcessInfo.processInfo.environment["VOICEVOICE_LLM_MODEL_DIR"] ?? "").isEmpty
     }
 
     /// Модель установлена локально (проверка для UI настроек).
@@ -135,7 +148,7 @@ final class LLMEditorService: ObservableObject {
         state = .loading
         DebugLog.log("LLM: load() begin")
         do {
-            if !Self.isModelInstalled {
+            if !Self.modelDirOverridden && !Self.isModelInstalled {
                 try await downloadModel()
                 state = .loading
             }
@@ -146,6 +159,27 @@ final class LLMEditorService: ObservableObject {
             let c = try await LLMModelFactory.shared.loadContainer(
                 from: Self.modelDir, using: TransformersTokenizerLoader())
             container = c
+            // «/no_think» выключает рассуждения только у Qwen; для других моделей это
+            // лишний текст в запросе, который они могут повторить в ответе.
+            if let data = try? Data(contentsOf: Self.modelDir.appendingPathComponent("config.json")),
+               let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let type = cfg["model_type"] as? String {
+                noThinkSuffix = type.hasPrefix("qwen") ? " /no_think" : ""
+            }
+            // Стоп-номера конца реплики. У части сборок (Gemma от mlx-community) нет
+            // generation_config.json, в config.json указан только общий <eos>, а реплику
+            // модель завершает <end_of_turn>: генерация шла до лимита, токен утекал в
+            // текст, гард отбрасывал правку. Номер кладём прямо в eosTokenIds — список
+            // extraEOSTokens на генерацию не повлиял (проверено). Мост токенизатора для
+            // отсутствующего токена возвращает номер <unk>, а не nil, — такие отсекаем.
+            await c.update { ctx in
+                let unk = ctx.tokenizer.unknownTokenId
+                for token in ["<end_of_turn>", "<|im_end|>", "<|eot_id|>"] {
+                    guard let id = ctx.tokenizer.convertTokenToId(token), id != unk else { continue }
+                    ctx.configuration.eosTokenIds.insert(id)
+                }
+                DebugLog.log("LLM: стоп-номера=\(ctx.configuration.eosTokenIds.sorted())")
+            }
             state = .ready
             DebugLog.log("LLM: state=ready (\(Self.hfRepo))")
             // Прогрев: первые predict'ы компилируют Metal-пайплайны.
@@ -289,7 +323,7 @@ final class LLMEditorService: ObservableObject {
         var result = pieces.joined(separator: " ").trimmingCharacters(in: .whitespaces)
         // Рубленые предложения с «А»/«Но»/«И» в начале — детерминированная склейка
         // запятой (LLM это правило не выполняет, см. PunctuationFixer).
-        let merged = PunctuationFixer.mergeCoordinatingClauses(result)
+        let merged = PunctuationFixer.mergeContinuationClauses(result)
         if merged != result {
             DebugLog.log("LLM: склейка союзов — \(Self.diffSummary(result, merged))")
             result = merged
@@ -316,7 +350,7 @@ final class LLMEditorService: ObservableObject {
         let session = ChatSession(
             container, history: history, generateParameters: params,
             additionalContext: ["enable_thinking": false])
-        let prompt = "<текст>\(chunk)</текст> /no_think"
+        let prompt = "<текст>\(chunk)</текст>\(noThinkSuffix)"
 
         let work = Task { try await session.respond(to: prompt) }
         let watchdog = Task {
@@ -336,6 +370,10 @@ final class LLMEditorService: ObservableObject {
     /// Снять служебное: блок рассуждений, теги, обрамляющие кавычки.
     static func cleanOutput(_ s: String) -> String {
         var t = s
+        // Страховка: всё после маркера конца реплики — мусор, даже если стоп не сработал.
+        for marker in ["<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<eos>"] {
+            if let r = t.range(of: marker) { t = String(t[..<r.lowerBound]) }
+        }
         if let re = try? NSRegularExpression(pattern: "<think>.*?</think>", options: [.dotMatchesLineSeparators]) {
             t = re.stringByReplacingMatches(in: t, range: NSRange(t.startIndex..., in: t), withTemplate: "")
         }
@@ -508,7 +546,7 @@ final class LLMEditorService: ObservableObject {
         let params = GenerateParameters(maxTokens: 8, temperature: 0.0)
         let session = ChatSession(container, history: history, generateParameters: params,
                                   additionalContext: ["enable_thinking": false])
-        let prompt = "Фраза: «\(text)»\nСлово: «\(word)»\n\(question) /no_think"
+        let prompt = "Фраза: «\(text)»\nСлово: «\(word)»\n\(question)\(noThinkSuffix)"
         let work = Task { try await session.respond(to: prompt) }
         let watchdog = Task {
             try await Task.sleep(nanoseconds: 10_000_000_000)

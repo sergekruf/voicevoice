@@ -75,6 +75,134 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Скрытый отладочный режим: `VoiceVoice --transcribe-test a.wav b.wav …` —
+        // прогоняет аудиофайлы через GigaAM (нарезка, стыки, склейка) без микрофона.
+        if let idx = CommandLine.arguments.firstIndex(of: "--transcribe-test"),
+           idx + 1 < CommandLine.arguments.count {
+            let paths = Array(CommandLine.arguments[(idx + 1)...])
+            Task { @MainActor in
+                for path in paths {
+                    do {
+                        let audio = try AudioFileDecoder.decode(url: URL(fileURLWithPath: path))
+                        let out = await GigaAMTranscriber.shared.transcribe(audio: audio)
+                        print("TRANSCRIBE-TEST \((path as NSString).lastPathComponent): \(out)")
+                    } catch {
+                        print("TRANSCRIBE-TEST \(path): \(error.localizedDescription)")
+                    }
+                }
+                exit(0)
+            }
+            return
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --seam-test` — сверка стыка аудио-кусков
+        // с контекстным прогоном (Transcriber.reconcileSeam) и перенос «?».
+        if CommandLine.arguments.contains("--seam-test") {
+            let cases: [(String, String, String, Transcriber.SeamVerdict)] = [
+                ("Скажи, как можно настроить здесь маршрутизацию?", "Трафика, чтобы зарубежные сайты шли через VPN.",
+                 "Скажи, как можно настроить здесь маршрутизацию трафика, чтобы зарубежные сайты шли через VP",
+                 .continuation(left: "Скажи, как можно настроить здесь маршрутизацию",
+                               right: "трафика, чтобы зарубежные сайты шли через VPN.", removedQuestion: true)),
+                ("Девушка бежит по набережной в этой ветровке.", "В одном из городов России, и мне понравился цвет.",
+                 "...девушка бежит по набережной в этой ветровке в одном из городов России, и мне очень",
+                 .continuation(left: "Девушка бежит по набережной в этой ветровке",
+                               right: "в одном из городов России, и мне понравился цвет.", removedQuestion: false)),
+                ("Российские сайты, типа Ozon.", "Wildberries, How и другие магазины шли напрямую",
+                 "российские сайты, типа Ozon, Wildberries, How и другие",
+                 .continuation(left: "Российские сайты, типа Ozon,",
+                               right: "Wildberries, How и другие магазины шли напрямую", removedQuestion: false)),
+                ("Включая акты и счета за прошлый месяц.", "Завтра утром отправим оригиналы.",
+                 "включая акты и счета за прошлый месяц. Завтра утром отправим оригиналы курьером", .boundary),
+                ("Ты придёшь туда к десяти утра?", "Если нет, напиши заранее.",
+                 "Ты придёшь туда к 10:00 утра? Если нет, напиши мне заранее", .boundary),
+                // Слово у стыка распознано вторым прогоном чуть иначе, оба соседа совпали.
+                ("Настроить здесь маршрутизацию?", "Трафика, чтобы сайты шли",
+                 "настроить здесь маршрутизации трафика, чтобы сайты шли",
+                 .continuation(left: "Настроить здесь маршрутизацию", right: "трафика, чтобы сайты шли",
+                               removedQuestion: true)),
+                ("Выйти на маркетплейсы Ozon.", "Wildberres и Яндекс Маркет одновременно",
+                 "выйти на маркетплейсы Ozon, Wildberrieces и ЯндексМаркет одновременно",
+                 .continuation(left: "Выйти на маркетплейсы Ozon,", right: "Wildberres и Яндекс Маркет одновременно",
+                               removedQuestion: false)),
+                // Созвучное слово, но сосед совпал только один — не трогаем.
+                ("Настроить здесь маршрутизацию?", "Трафика, чтобы сайты шли",
+                 "как настроить маршрутизации трафика и сайты", .unmatched),
+                // Совпала только пара без соседей — случайность, не трогаем.
+                ("Потом поедем в офис.", "В понедельник созвонимся.", "и офис в пятницу", .unmatched),
+            ]
+            var ok = 0
+            for (left, right, context, expected) in cases {
+                let got = Transcriber.reconcileSeam(left: left, right: right, context: context)
+                if got == expected { ok += 1 }
+                print("\(got == expected ? "PASS" : "FAIL")  «\(left) | \(right)» → \(got)"
+                      + (got == expected ? "" : "\n      ожидалось: \(expected)"))
+            }
+            let moves: [(String, String, Bool)] = [
+                ("трафика, чтобы сайты шли напрямую. Потом проверим.", "трафика, чтобы сайты шли напрямую? Потом проверим.", true),
+                ("сайты шли через ozon.ru и 10.5 раз", "сайты шли через ozon.ru и 10.5 раз", false),
+                ("напиши заранее! Потом созвонимся.", "напиши заранее! Потом созвонимся.", true),
+            ]
+            for (input, expected, expectedDone) in moves {
+                let got = Transcriber.moveQuestionMark(into: input)
+                let pass = got.text == expected && got.done == expectedDone
+                if pass { ok += 1 }
+                print("\(pass ? "PASS" : "FAIL")  перенос «?»: \(got.text) (done=\(got.done))")
+            }
+            print("\nверно: \(ok)/\(cases.count + moves.count)")
+            exit(0)
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --merge-test` — склейка продолжений
+        // после точки и вопросительного знака (PunctuationFixer.mergeContinuationClauses).
+        if CommandLine.arguments.contains("--merge-test") {
+            let cases: [(String, String)] = [
+                ("Почему в последней фразе перед последним предложением поставилась точка? Хотя по смыслу это целое предложение.",
+                 "Почему в последней фразе перед последним предложением поставилась точка, хотя по смыслу это целое предложение?"),
+                ("Сделаем завтра. Хотя можно и сегодня.", "Сделаем завтра, хотя можно и сегодня."),
+                ("Отправил заявку. Потому что срок горит.", "Отправил заявку, потому что срок горит."),
+                ("Добавь фильтр. Чтобы он не терялся при возврате.", "Добавь фильтр, чтобы он не терялся при возврате."),
+                ("Там заложена маржинальность. Но покупатель увидит цену на комплект.",
+                 "Там заложена маржинальность, но покупатель увидит цену на комплект."),
+                ("Почему ушёл? Потому что устал.", "Почему ушёл? Потому что устал."),
+                ("Ты придёшь? Если нет, напиши.", "Ты придёшь? Если нет, напиши."),
+                ("Договорились! Хотя сроки жмут.", "Договорились! Хотя сроки жмут."),
+                ("Хотя это неважно.", "Хотя это неважно."),
+                ("Проверь остатки. Вопрос закрыт?", "Проверь остатки. Вопрос закрыт?"),
+                ("Сделай отчёт. Отправь его Николаю.", "Сделай отчёт. Отправь его Николаю."),
+            ]
+            var ok = 0
+            for (input, expected) in cases {
+                let got = PunctuationFixer.mergeContinuationClauses(input)
+                if got == expected { ok += 1 }
+                print("\(got == expected ? "PASS" : "FAIL")  \(got)\(got == expected ? "" : "\n      ожидалось: \(expected)")")
+            }
+            print("\nверно: \(ok)/\(cases.count)")
+            exit(0)
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --diff-test` — что попадёт в словарь
+        // при правке распознанного текста (путь Edit & Learn: raw → final).
+        if CommandLine.arguments.contains("--diff-test") {
+            let cases: [(String, String, String)] = [
+                ("Найди бота вент система по Ozon", "Найди бота Вентсистема по Ozon",
+                 "вент система → Вентсистема"),
+                ("Перейти в колонку и того", "Перейти в колонку итого", "и того → итого"),
+                ("Проверь фрисовые шапки", "Проверь флисовые шапки", "фрисовые → флисовые"),
+                ("Отправь на ля моду сегодня", "Отправь на Lamoda сегодня", "ля моду → Lamoda"),
+                ("Посчитай себе с товара", "Посчитай себестоимость товара", "себе с → себестоимость"),
+                ("Мне нужно подумать механизм как это сделать",
+                 "Надо придумать способ реализации", "(переписывание — не одна пара)"),
+            ]
+            for (raw, final, expect) in cases {
+                let signals = CorrectionLearner.extract(raw: raw, applied: raw, final: final,
+                                                        autoApplied: [])
+                let got = signals.confirmations
+                    .map { "«\($0.wrong)» → «\($0.right)»" }.joined(separator: ", ")
+                print("ожидалось \(expect)\n  получено: \(got.isEmpty ? "(ничего)" : got)")
+            }
+            exit(0)
+        }
+
         // Скрытый отладочный режим: `VoiceVoice --mine-history` — печатает кандидатов
         // в словарь из истории (то же, что кнопка «Разбор диктовок…»), плюс самотест
         // извлечения пар на синтетике, т.к. у старых записей сырого текста нет.

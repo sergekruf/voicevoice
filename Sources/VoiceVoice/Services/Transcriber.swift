@@ -636,6 +636,113 @@ final class Transcriber: ObservableObject {
         return s.prefix(1).lowercased() + s.dropFirst()
     }
 
+    // MARK: - Стык кусков: сверка с контекстным прогоном
+
+    /// Вердикт по стыку двух кусков, левый из которых кончается знаком конца предложения.
+    /// Контекстный прогон делает движок (`GigaAMTranscriber.reconcileSeams`), здесь —
+    /// текстовая часть: найти стык в контексте и перенести решение о знаке.
+    enum SeamVerdict: Equatable {
+        /// Пара слов у стыка не нашлась в контексте однозначно — не трогаем.
+        case unmatched
+        /// В контексте на стыке тоже граница предложения — знак настоящий.
+        case boundary
+        /// В контексте знака нет: убираем его (запятую из контекста сохраняем),
+        /// регистр первого слова справа — как в контексте.
+        case continuation(left: String, right: String, removedQuestion: Bool)
+    }
+
+    nonisolated private static let seamTerminators: Set<Character> = [".", "?", "!", "…"]
+
+    private struct SeamWord {
+        let core: String
+        let trailing: String
+        let startsLowercase: Bool
+    }
+
+    nonisolated private static func seamWords(_ s: String) -> [SeamWord] {
+        s.split(whereSeparator: { $0.isWhitespace }).compactMap { token -> SeamWord? in
+            let core = String(token.filter { $0.isLetter || $0.isNumber })
+                .lowercased().replacingOccurrences(of: "ё", with: "е")
+            guard !core.isEmpty else { return nil }
+            let trailing = String(token.reversed().prefix(while: { !$0.isLetter && !$0.isNumber }).reversed())
+            let startsLowercase = token.first(where: { $0.isLetter })?.isLowercase ?? false
+            return SeamWord(core: core, trailing: trailing, startsLowercase: startsLowercase)
+        }
+    }
+
+    /// Созвучие не дальше 30% длины и не для коротких слов («в» / «во» — не созвучие).
+    nonisolated private static func isSimilarSeamWord(_ a: String, _ b: String) -> Bool {
+        guard min(a.count, b.count) >= 4 else { return false }
+        return a.levenshteinDistance(to: b) * 10 <= max(a.count, b.count) * 3
+    }
+
+    nonisolated static func endsWithSentenceTerminator(_ s: String) -> Bool {
+        guard let last = s.trimmingCharacters(in: .whitespaces).last else { return false }
+        return seamTerminators.contains(last)
+    }
+
+    nonisolated static func reconcileSeam(left: String, right: String, context: String) -> SeamVerdict {
+        let l = seamWords(left), r = seamWords(right), c = seamWords(context)
+        guard let l1 = l.last, let r1 = r.first, c.count >= 3 else { return .unmatched }
+        let l2 = l.count >= 2 ? l[l.count - 2].core : nil
+        let r2 = r.count >= 2 ? r[1].core : nil
+        // Пара «последнее слово слева — первое справа» подряд плюс хотя бы один сосед:
+        // одна короткая пара («офис | в») совпадает и случайно. Второй прогон может
+        // распознать слово у стыка чуть иначе (бренды: «Wildberres» / «Wildberrieces») —
+        // тогда одно из двух допускается созвучным, но совпасть должны оба соседа.
+        var matches: [Int] = []
+        for k in 0..<(c.count - 1) {
+            let leftExact = c[k].core == l1.core, rightExact = c[k + 1].core == r1.core
+            guard leftExact || rightExact else { continue }
+            let leftNeighbor = k > 0 && l2 != nil && c[k - 1].core == l2
+            let rightNeighbor = k + 2 < c.count && r2 != nil && c[k + 2].core == r2
+            if leftExact && rightExact {
+                if leftNeighbor || rightNeighbor { matches.append(k) }
+            } else if leftNeighbor && rightNeighbor,
+                      isSimilarSeamWord(leftExact ? c[k + 1].core : c[k].core,
+                                        leftExact ? r1.core : l1.core) {
+                matches.append(k)
+            }
+        }
+        guard matches.count == 1, let k = matches.first else { return .unmatched }
+        if c[k].trailing.contains(where: { seamTerminators.contains($0) }) { return .boundary }
+
+        var newLeft = left
+        var removed = ""
+        while let last = newLeft.last, seamTerminators.contains(last) || last.isWhitespace {
+            removed.append(last)
+            newLeft.removeLast()
+        }
+        if let mark = c[k].trailing.first(where: { ",;:".contains($0) }) { newLeft.append(mark) }
+        var newRight = right
+        if c[k + 1].startsLowercase, let idx = newRight.firstIndex(where: { $0.isLetter }),
+           newRight[idx].isUppercase {
+            newRight.replaceSubrange(idx...idx, with: newRight[idx].lowercased())
+        }
+        return .continuation(left: newLeft, right: newRight, removedQuestion: removed.contains("?"))
+    }
+
+    /// Убранный на стыке «?» не теряем: вопрос продолжился в следующем куске, и знак
+    /// встаёт в конец этого предложения — на место первой точки или многоточия
+    /// («…шли напрямую.» → «…шли напрямую?»). Если первым встретился «!» или «?» —
+    /// предложение уже закончено своим знаком. `done == false` — знака в тексте нет,
+    /// перенос продолжается в следующий кусок.
+    nonisolated static func moveQuestionMark(into text: String) -> (text: String, done: Bool) {
+        var chars = Array(text)
+        var i = 1
+        while i < chars.count {
+            guard seamTerminators.contains(chars[i]), !chars[i - 1].isWhitespace else { i += 1; continue }
+            var j = i
+            while j < chars.count, seamTerminators.contains(chars[j]) { j += 1 }
+            // Точка внутри «ozon.ru», «10.5» — не конец предложения.
+            guard j == chars.count || chars[j].isWhitespace else { i = j; continue }
+            if chars[i..<j].contains("?") || chars[i..<j].contains("!") { return (text, true) }
+            chars.replaceSubrange(i..<j, with: ["?"])
+            return (String(chars), true)
+        }
+        return (text, false)
+    }
+
     static func cleanup(_ s: String) -> String {
         // Trim and collapse leading/trailing whitespace; Whisper sometimes adds a leading space.
         var t = s.trimmingCharacters(in: .whitespacesAndNewlines)

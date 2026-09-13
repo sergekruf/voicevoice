@@ -63,50 +63,67 @@ enum PunctuationFixer {
         return result
     }
 
-    // MARK: - Сочинительные союзы в начале предложения
+    // MARK: - Продолжения после терминатора
 
     /// «…маржинальность. Но покупатель увидит…» → «…маржинальность, но покупатель
-    /// увидит…». Движки (у GigaAM пунктуация встроенная) ставят точку по паузе в
-    /// речи, и длинная мысль рассыпается на рубленые предложения с «А», «Но», «И»
-    /// в начале. Запятая перед сочинительным союзом обязательна по правилам, так
-    /// что склейка грамматически безопасна — вопрос только меры, поэтому:
-    ///   • склеиваем лишь после точки (после «?» и «!» интонация другая);
-    ///   • результат не длиннее `maxMergedLength` — иначе абзац станет монстром;
+    /// увидит…»; «…поставилась точка? Хотя по смыслу это целое предложение.» →
+    /// «…поставилась точка, хотя по смыслу это целое предложение?». Движок (у GigaAM
+    /// пунктуация встроенная) ставит терминатор по паузе или интонации, и одна мысль
+    /// рассыпается на фразы, начинающиеся с союза. LLM это правило выполнять
+    /// отказалась даже с примером в промпте (проверено на Qwen3-1.7B), а знак
+    /// вопроса ей менять запрещено вовсе, поэтому шаг детерминированный. Меры:
+    ///   • результат не длиннее `maxMergedLength`;
     ///   • к уже склеенному предложению третье не присоединяем.
-    /// LLM это правило выполнять отказалась даже с примером в промпте (проверено на
-    /// Qwen3-1.7B), поэтому шаг детерминированный.
     private static let maxMergedLength = 220
-    private static let coordinatingConjunctions: Set<String> = ["а", "но", "и"]
 
-    static func mergeCoordinatingClauses(_ text: String) -> String {
+    /// После точки: сочинительные «а/но/и» и подчинительные союзы — с них в диктовке
+    /// начинается продолжение предыдущей мысли, а не новая.
+    private static let leadsAfterPeriod: [String] = [
+        "потому что", "так как", "то есть",
+        "а", "но", "и", "хотя", "поскольку", "чтобы",
+        "который", "которая", "которое", "которые", "которых", "которым", "которой",
+        "которую", "которого", "котором", "которыми", "которому",
+    ]
+    /// После вопросительного знака — только уступительное «хотя». «Почему ушёл?
+    /// Потому что устал.» — это вопрос и ответ, а «Ты придёшь? Если нет, напиши.» —
+    /// два предложения; склеивать их нельзя.
+    private static let leadsAfterQuestion: [String] = ["хотя"]
+
+    static func mergeContinuationClauses(_ text: String) -> String {
         let sentences = splitSentencesPreservingTrailingSpace(text)
         guard sentences.count > 1 else { return text }
         var out: [String] = []
         var lastWasMerged = false
         for sentence in sentences {
             let trimmed = sentence.trimmingCharacters(in: .whitespaces)
-            guard var prev = out.last, !lastWasMerged,
-                  let firstWord = trimmed.split(separator: " ").first,
-                  coordinatingConjunctions.contains(String(firstWord).lowercased()),
-                  firstWord.first?.isUppercase == true,
-                  prev.trimmingCharacters(in: .whitespaces).hasSuffix("."),
-                  prev.count + trimmed.count <= maxMergedLength
-            else {
-                out.append(sentence)
-                lastWasMerged = false
-                continue
+            let lower = trimmed.lowercased()
+            func starts(with leads: [String]) -> Bool {
+                leads.contains { lower == $0 || lower.hasPrefix($0 + " ") || lower.hasPrefix($0 + ",") }
             }
-            // Снимаем точку у предыдущего, союз пишем со строчной, хвостовой
-            // пробел исходного предложения сохраняем.
+            guard var prev = out.last, !lastWasMerged,
+                  trimmed.first?.isUppercase == true else {
+                out.append(sentence); lastWasMerged = false; continue
+            }
+            let prevTrim = prev.trimmingCharacters(in: .whitespaces)
+            let afterPeriod = prevTrim.hasSuffix(".") && !prevTrim.hasSuffix("..") && starts(with: leadsAfterPeriod)
+            let afterQuestion = prevTrim.hasSuffix("?") && starts(with: leadsAfterQuestion)
+            guard afterPeriod || afterQuestion, prev.count + trimmed.count <= maxMergedLength else {
+                out.append(sentence); lastWasMerged = false; continue
+            }
             while let last = prev.last, last.isWhitespace { prev.removeLast() }
-            while prev.hasSuffix(".") { prev.removeLast() }
+            while let last = prev.last, ".?".contains(last) { prev.removeLast() }
             var tail = ""
             for ch in sentence.reversed() {
                 guard ch.isWhitespace else { break }
                 tail.append(ch)
             }
-            let lowered: String = trimmed.prefix(1).lowercased() + trimmed.dropFirst()
-            out[out.count - 1] = prev + ", " + lowered + tail
+            var body: String = trimmed.prefix(1).lowercased() + trimmed.dropFirst()
+            if afterQuestion {
+                // Вопрос относится ко всей склеенной фразе — знак переезжает в её конец.
+                while let last = body.last, ".!…".contains(last) { body.removeLast() }
+                body.append("?")
+            }
+            out[out.count - 1] = prev + ", " + body + tail
             lastWasMerged = true
         }
         return out.joined()

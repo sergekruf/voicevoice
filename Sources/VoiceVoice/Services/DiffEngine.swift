@@ -54,26 +54,76 @@ enum DiffEngine {
         return a.text == b.text
     }
 
-    /// Convert adjacent delete+insert (on word tokens) into a single replace.
+    /// Схлопывает блок удалений и вставок в ОДНУ замену — в том числе многословную.
+    ///
+    /// Раньше схлопывалась только соседняя пара delete+insert, то есть замена
+    /// строго «слово на слово». Если пользователь правил «вент система» →
+    /// «Вентсистема», получалось три удаления и одна вставка, и в словарь уходил
+    /// огрызок вроде «система» → «Вентсистема» — правило, которое в жизни не
+    /// срабатывает. Теперь соседние удаления и вставки собираются целиком, а
+    /// пробелы внутри блока сохраняются: в словарь попадает «вент система» →
+    /// «Вентсистема».
+    ///
+    /// Ограничение `maxPhraseWords`: длинные куски — это переписывание смысла, а не
+    /// ослышка, такие блоки оставляем как есть (их отсеют фильтры выше по стеку).
+    private static let maxPhraseWords = 3
+
     private static func collapseToReplace(_ ops: [DiffOp]) -> [DiffOp] {
         var result: [DiffOp] = []
         var i = 0
         while i < ops.count {
-            let cur = ops[i]
-            let next = i + 1 < ops.count ? ops[i + 1] : nil
-            switch (cur, next) {
-            case (.delete(let d), .insert(let ins)?) where d.isWord && ins.isWord:
-                result.append(.replace(d, ins))
-                i += 2
-            case (.insert(let ins), .delete(let d)?) where d.isWord && ins.isWord:
-                result.append(.replace(d, ins))
-                i += 2
-            default:
-                result.append(cur)
+            switch ops[i] {
+            case .equal, .replace:
+                result.append(ops[i])
                 i += 1
+                continue
+            case .delete, .insert:
+                break
             }
+            // Границы блока: идём вперёд, пока встречаются удаления и вставки.
+            // Пробелы и знаки, совпавшие в обеих версиях, блок не разрывают —
+            // иначе «вент система» → «Вентсистема» распалось бы на огрызки, —
+            // а вот совпавшее СЛОВО означает конец правки.
+            var j = i
+            var lastChange = i - 1
+            scan: while j < ops.count {
+                switch ops[j] {
+                case .delete, .insert: lastChange = j
+                case .equal(let t): if t.isWord { break scan }
+                case .replace: break scan
+                }
+                j += 1
+            }
+            let blockEnd = lastChange + 1
+            guard blockEnd > i else { result.append(ops[i]); i += 1; continue }
+
+            var deleted: [Token] = []
+            var inserted: [Token] = []
+            for op in ops[i..<blockEnd] {
+                switch op {
+                case .delete(let t): deleted.append(t)
+                case .insert(let t): inserted.append(t)
+                case .equal(let t): deleted.append(t); inserted.append(t)   // общий пробел
+                case .replace(let o, let n): deleted.append(o); inserted.append(n)
+                }
+            }
+            let dWords = deleted.filter(\.isWord).count
+            let iWords = inserted.filter(\.isWord).count
+            if dWords > 0, iWords > 0, dWords <= maxPhraseWords, iWords <= maxPhraseWords {
+                result.append(.replace(joinedToken(deleted), joinedToken(inserted)))
+            } else {
+                result.append(contentsOf: ops[i..<blockEnd])
+            }
+            i = blockEnd
         }
         return result
+    }
+
+    /// Склеивает токены блока в один «фразовый» токен, обрезая крайние пробелы:
+    /// внутренние остаются, чтобы «вент система» не превратилось в «вентсистема».
+    private static func joinedToken(_ tokens: [Token]) -> Token {
+        let text = tokens.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        return Token(kind: .word, text: text)
     }
 }
 
@@ -125,7 +175,9 @@ enum CorrectionLearner {
                     let ctx = Tokenizer.previousWord(in: rawTokens, beforeIndex: idxInRaw)
                     confirmations.append((wrong: oldWord.lowercased(), right: newWord, context: ctx))
                 }
-                idxInRaw += 1
+                // Замена может покрывать несколько токенов оригинала («вент система»),
+                // иначе контекст последующих правок съедет.
+                idxInRaw += max(1, Tokenizer.tokenize(oldWord).count)
             }
         }
 

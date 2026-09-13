@@ -268,12 +268,13 @@ final class GigaAMTranscriber: ObservableObject {
 
         let start = Date()
         let chunks = Transcriber.chunkBySilence(audio)
-        var items: [(text: String, realPauseAfter: Bool)] = []
+        var decoded: [(text: String, sentenceEnds: [Int])?] = Array(repeating: nil, count: chunks.count)
         var failedChunks = 0
         for (i, chunk) in chunks.enumerated() {
             if Task.isCancelled { break }
             do {
-                let t = try await decode(chunk.samples, models: models)
+                let d = try await decodeDetailed(chunk.samples, models: models)
+                let t = d.text
                 DebugLog.log("GigaAM: chunk \(i + 1)/\(chunks.count) samples=\(chunk.samples.count) → \(t.count) chars")
                 // Крошечный хвостовой кусок (<1.2 с), распознанный в одну букву, —
                 // остаточный звук/выдох, а не речь («…не тот товар. У.»).
@@ -282,25 +283,92 @@ final class GigaAMTranscriber: ObservableObject {
                 if isTinyTail && t.filter({ $0.isLetter }).count <= 1 {
                     DebugLog.log("GigaAM: dropping single-letter tail noise: \"\(t)\"")
                 } else if !t.isEmpty {
-                    items.append((t, chunk.realPauseAfter))
+                    decoded[i] = d
                 }
             } catch {
                 failedChunks += 1
                 DebugLog.log("GigaAM: chunk \(i + 1)/\(chunks.count) FAILED — \(error.localizedDescription); keeping the rest")
             }
         }
+        let items = await reconcileSeams(audio: audio, chunks: chunks, decoded: decoded, models: models)
         lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
         let cleaned = Transcriber.cleanup(Transcriber.joinChunkTexts(items))
         DebugLog.log("GigaAM: done in \(lastProcessingMs)ms, chunks=\(chunks.count), failed=\(failedChunks), len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
         return cleaned
     }
 
+    /// Стыки кусков. Движок расставляет знаки в каждом куске по отдельности и конец
+    /// куска считает концом высказывания, поэтому заминка посреди фразы, на которую
+    /// пришёлся рез, становится ложной границей («маршрутизацию? Трафика»,
+    /// «ветровке. В одном из городов России»). Стык, где левый кусок кончился знаком,
+    /// распознаётся ещё раз с контекстом по обе стороны, и решение о знаке берётся из
+    /// этого прогона. Окно начинается с начала последнего предложения левого куска:
+    /// с середины фразы движок недоставляет знаки и терял настоящий «?» («…к десяти
+    /// утра? Если нет…»). Цена — один прогон (~0,1 с) на стык со знаком.
+    private func reconcileSeams(audio: [Float], chunks: [Transcriber.AudioChunk],
+                                decoded: [(text: String, sentenceEnds: [Int])?],
+                                models: RNNTModels) async -> [(text: String, realPauseAfter: Bool)] {
+        let sr = Int(AudioRecorder.targetSampleRate)
+        var texts = decoded.map { $0?.text }
+        var pauses = chunks.map(\.realPauseAfter)
+        var carryQuestion = false
+        var chunkStart = 0
+        for i in chunks.indices {
+            defer { chunkStart += chunks[i].samples.count }
+            if carryQuestion, let t = texts[i] {
+                let moved = Transcriber.moveQuestionMark(into: t)
+                texts[i] = moved.text
+                carryQuestion = !moved.done
+            }
+            guard i + 1 < chunks.count, !Task.isCancelled,
+                  let left = texts[i], let right = texts[i + 1], let ends = decoded[i]?.sentenceEnds,
+                  Transcriber.endsWithSentenceTerminator(left) else { continue }
+            let length = chunks[i].samples.count
+            // Знаки в последние 1,5 с куска — это и есть проверяемый стык.
+            let sentenceStart = ends.last(where: { $0 < length - 3 * sr / 2 }) ?? 0
+            let seam = chunkStart + length
+            let maxWindow = 14 * sr
+            var lo = chunkStart + sentenceStart
+            var hi = min(audio.count, seam + 6 * sr)
+            if hi - lo > maxWindow { hi = max(min(audio.count, seam + 3 * sr), lo + maxWindow) }
+            if hi - lo > maxWindow { lo = hi - maxWindow }
+            guard let context = try? await decode(Array(audio[lo..<hi]), models: models) else { continue }
+            let seamText = "«…\(left.split(separator: " ").suffix(2).joined(separator: " ")) | "
+                + "\(right.split(separator: " ").prefix(2).joined(separator: " "))…»"
+            switch Transcriber.reconcileSeam(left: left, right: right, context: context) {
+            case .unmatched:
+                DebugLog.log("GigaAM: стык \(i + 1) \(seamText) — в контексте не найден, без изменений")
+            case .boundary:
+                pauses[i] = true
+                DebugLog.log("GigaAM: стык \(i + 1) \(seamText) — граница подтверждена")
+            case .continuation(let newLeft, let newRight, let removedQuestion):
+                texts[i] = newLeft
+                texts[i + 1] = newRight
+                pauses[i] = true
+                if removedQuestion { carryQuestion = true }
+                DebugLog.log("GigaAM: стык \(i + 1) \(seamText) — ложная граница, знак убран")
+            }
+        }
+        if carryQuestion, let last = texts.lastIndex(where: { $0 != nil }), let t = texts[last] {
+            texts[last] = t.trimmingCharacters(in: .whitespaces) + "?"
+        }
+        return texts.indices.compactMap { i in texts[i].map { ($0, pauses[i]) } }
+    }
+
+    private func decode(_ samples: [Float], models: RNNTModels) async throws -> String {
+        try await decodeDetailed(samples, models: models).text
+    }
+
+    private final class SentenceEnds: @unchecked Sendable { var samples: [Int] = [] }
+
     /// Один прогон окна: паддинг → энкодер (ANE) → жадный RNNT-цикл (CPU): на каждом
     /// кадре joint выбирает токен с учётом состояния декодера; blank двигает кадр,
     /// не-blank дописывается в гипотезу и прокручивает декодер. Весь цикл — одним
     /// куском на фоновой очереди (сотни мелких predict; MLModel потокобезопасен).
-    private func decode(_ samples: [Float], models: RNNTModels) async throws -> String {
-        guard samples.count >= Int(AudioRecorder.targetSampleRate * 0.25) else { return "" }
+    /// Кроме текста — позиции (в сэмплах от начала окна) токенов «. ? ! …»: по ним
+    /// стык находит начало последнего предложения куска.
+    private func decodeDetailed(_ samples: [Float], models: RNNTModels) async throws -> (text: String, sentenceEnds: [Int]) {
+        guard samples.count >= Int(AudioRecorder.targetSampleRate * 0.25) else { return ("", []) }
         let window = windowSamples
         var padded = [Float](repeating: 0, count: window)
         let n = min(samples.count, window)
@@ -318,6 +386,7 @@ final class GigaAMTranscriber: ObservableObject {
         let layers = self.predLayers
         let hidden = self.predHidden
 
+        let ends = SentenceEnds()
         let raw: String = try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
@@ -389,7 +458,12 @@ final class GigaAMTranscriber: ObservableObject {
                                 break
                             }
                             if best == blank { break }
-                            if best < vocab.count { pieces.append(vocab[best]) }
+                            if best < vocab.count {
+                                pieces.append(vocab[best])
+                                if vocab[best].contains(where: { ".?!…".contains($0) }) {
+                                    ends.samples.append(t * window / totalFrames)
+                                }
+                            }
                             try decoderStep(best)
                             emitted += 1
                         }
@@ -402,7 +476,7 @@ final class GigaAMTranscriber: ObservableObject {
                 }
             }
         }
-        return Self.dropInconsistentBoundaries(Self.stripUnitTails(raw))
+        return (Self.dropInconsistentBoundaries(Self.stripUnitTails(raw)), ends.samples)
     }
 
     // MARK: - Output post-fixes
