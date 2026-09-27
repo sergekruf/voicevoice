@@ -198,24 +198,87 @@ final class TextInserter {
 
     // MARK: - Выделенный текст (быстрая правка)
 
+    /// Выделение в активном поле: текст и, если поле видно службам доступности, само
+    /// поле с позицией выделения — чтобы вернуть его перед заменой. Chromium/Electron
+    /// (Claude) сбрасывают выделение, пока окошко быстрой правки держит клавиатуру.
+    struct Selection {
+        let text: String
+        let field: AXUIElement?
+        let range: CFRange?
+    }
+
     /// Выделенный текст в активном поле. Сначала через службы доступности (без побочных
     /// эффектов); если приложение их не даёт (MAX, Termius, браузеры) — через ⌘C с
     /// возвратом прежнего буфера. nil — ничего не выделено.
-    func selectedText() async -> String? {
+    func selection() async -> Selection? {
         let front = NSWorkspace.shared.frontmostApplication
         Self.prepareAccessibility(for: front)
         var element = Self.copyFocusedElement()
         if element == nil || Self.readValue(from: element!) == nil, let pid = front?.processIdentifier {
             element = Self.findFocusedTextElement(pid: pid).field ?? element
         }
+        // Для проверки пути «поле не видно» (MAX, браузеры) на любом приложении.
+        if ProcessInfo.processInfo.environment["VOICEVOICE_QUICKFIX_CMDC"] != nil { element = nil }
         if let element {
             var sel: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &sel) == .success,
                let s = sel as? String, !s.isEmpty {
-                return s
+                return Selection(text: s, field: element, range: Self.selectedRange(of: element))
             }
         }
-        // ⌘C: если буфер не изменился — выделения нет.
+        return await copiedSelection().map { Selection(text: $0, field: nil, range: nil) }
+    }
+
+    private static func selectedRange(of element: AXUIElement) -> CFRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        return AXValueGetValue(v as! AXValue, .cfRange, &range) ? range : nil
+    }
+
+    /// Вернуть выделение перед заменой и убедиться, что выделено именно `expected`.
+    /// - Поле видно: ставим сохранённую позицию обратно через службы доступности.
+    /// - Не видно: проверяем ⌘C; если выделение сброшено (курсор остался в конце
+    ///   слова — так ведёт себя Chromium), выделяем заново shift+← по числу символов.
+    func restoreSelection(_ sel: Selection) async -> Bool {
+        if let field = sel.field, let saved = sel.range {
+            var range = saved
+            if let axRange = AXValueCreate(.cfRange, &range) {
+                AXUIElementSetAttributeValue(field, kAXSelectedTextRangeAttribute as CFString, axRange)
+            }
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            var now: CFTypeRef?
+            if AXUIElementCopyAttributeValue(field, kAXSelectedTextAttribute as CFString, &now) == .success,
+               (now as? String) == sel.text {
+                return true
+            }
+            DebugLog.log("QuickFix: выделение через службы доступности не вернулось — пробую клавиатурой")
+        }
+        if await copiedSelection() == sel.text { return true }
+        let n = sel.text.count
+        guard n <= 60 else { return false }
+        postKey(CGKeyCode(kVK_LeftArrow), flags: .maskShift, times: n)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        return await copiedSelection() == sel.text
+    }
+
+    private func postKey(_ key: CGKeyCode, flags: CGEventFlags, times: Int) {
+        guard let src = CGEventSource(stateID: .hidSystemState) else { return }
+        for _ in 0..<times {
+            guard let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false) else { return }
+            down.flags = flags
+            up.flags = flags
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            usleep(4_000)
+        }
+    }
+
+    /// Выделенный текст через ⌘C с возвратом прежнего буфера; nil — выделения нет
+    /// (буфер не изменился).
+    private func copiedSelection() async -> String? {
         let snapshot = ClipboardSnapshot.capture()
         let before = NSPasteboard.general.changeCount
         guard synthesizeCmdCViaCGEvent() else { return nil }

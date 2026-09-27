@@ -72,17 +72,22 @@ struct QuickFixResultToast: View {
     let wrong: String
     let right: String
     let learned: Bool
+    var replaced = true
+
+    private var subtitle: String {
+        let dict = learned ? "добавлено в словарь" : "в словарь не добавлено: «\(wrong)» — обычное слово, правило испортило бы другие фразы"
+        return replaced ? "Заменено, \(dict)." : "Выделение сбросилось — «\(right)» в буфере, вставьте ⌘V вместо слова. Пара \(dict)."
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: learned ? "book.closed.fill" : "checkmark.circle.fill")
+            Image(systemName: replaced ? (learned ? "book.closed.fill" : "checkmark.circle.fill") : "doc.on.clipboard")
                 .font(.system(size: 20))
-                .foregroundStyle(learned ? .green : .cyan)
+                .foregroundStyle(replaced && learned ? .green : .cyan)
             VStack(alignment: .leading, spacing: 3) {
                 Text("«\(wrong)» → «\(right)»")
                     .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                Text(learned ? "Заменено и добавлено в словарь"
-                             : "Заменено в тексте. В словарь не добавлено: «\(wrong)» — обычное слово, правило испортило бы другие фразы.")
+                Text(subtitle)
                     .font(.system(size: 11)).foregroundStyle(.white.opacity(0.75))
                     .fixedSize(horizontal: false, vertical: true)
             }

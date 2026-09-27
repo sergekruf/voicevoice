@@ -57,9 +57,10 @@ final class HUDManager {
     func hideResult() { resultPanel?.orderOut(nil) }
 
     /// Итог быстрой правки — ответ на явное действие, поэтому и в тихом режиме.
-    func showQuickFixResult(wrong: String, right: String, learned: Bool) {
-        let view = QuickFixResultToast(wrong: wrong, right: right, learned: learned)
-        present(view: view, ref: &learnedPanel, size: NSSize(width: 520, height: learned ? 70 : 90), autohide: 4.0)
+    func showQuickFixResult(wrong: String, right: String, learned: Bool, replaced: Bool) {
+        let view = QuickFixResultToast(wrong: wrong, right: right, learned: learned, replaced: replaced)
+        present(view: view, ref: &learnedPanel, size: NSSize(width: 520, height: learned && replaced ? 70 : 90),
+                autohide: replaced ? 4.0 : 7.0)
     }
 
     /// Текст оказался в буфере обмена (поля нет, вставка не прошла или курсор мог уйти из

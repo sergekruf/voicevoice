@@ -61,26 +61,27 @@ final class QuickFixService {
         busy = true
         Task { @MainActor in
             defer { busy = false }
-            guard let selected = await TextInserter.shared.selectedText() else {
+            guard let sel = await TextInserter.shared.selection() else {
                 DebugLog.log("QuickFix: нажатие, но ничего не выделено")
                 return
             }
+            let selected = sel.text
             let wrong = selected.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !wrong.isEmpty, wrong.count <= 60, !wrong.contains("\n"),
                   wrong.split(separator: " ").count <= 5 else {
                 DebugLog.log("QuickFix: выделено слишком много (\(selected.count) симв.) — не похоже на ослышку")
                 return
             }
-            DebugLog.log("QuickFix: выделено «\(wrong)» — окошко правки")
-            showPanel(wrong: wrong)
+            DebugLog.log("QuickFix: выделено «\(wrong)» (\(sel.field != nil ? "поле видно" : "через ⌘C")) — окошко правки")
+            showPanel(selection: sel, wrong: wrong)
         }
     }
 
     // MARK: - Окошко
 
-    private func showPanel(wrong: String) {
+    private func showPanel(selection: TextInserter.Selection, wrong: String) {
         let view = QuickFixView(wrong: wrong,
-                                onSubmit: { [weak self] right in self?.apply(wrong: wrong, right: right) },
+                                onSubmit: { [weak self] right in self?.apply(selection: selection, wrong: wrong, right: right) },
                                 onCancel: { [weak self] in self?.closePanel() })
         let host = NSHostingController(rootView: view)
         let p = KeyablePanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 150),
@@ -113,26 +114,31 @@ final class QuickFixService {
         panel = nil
     }
 
-    private func apply(wrong: String, right rawRight: String) {
+    private func apply(selection: TextInserter.Selection, wrong: String, right rawRight: String) {
         closePanel()
         let right = rawRight.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !right.isEmpty, right != wrong else { return }
         Task { @MainActor in
-            // Выделение в поле всё ещё активно — вставка заменит именно его.
             try? await Task.sleep(nanoseconds: 120_000_000)
-            _ = await TextInserter.shared.paste(right)
+            // Выделение могло сброситься, пока окошко держало клавиатуру (Chromium/
+            // Electron) — возвращаем его; не вышло — не вставляем рядом, а в буфер.
+            let replaced = await TextInserter.shared.restoreSelection(selection)
+            if replaced {
+                // Пробелы вокруг выделенного слова сохраняем: заменяем только его ядро.
+                let lead = String(selection.text.prefix(while: { $0.isWhitespace }))
+                let trail = String(selection.text.reversed().prefix(while: { $0.isWhitespace }).reversed())
+                _ = await TextInserter.shared.paste(lead + right + trail)
+            } else {
+                DebugLog.log("QuickFix: выделение не восстановилось — правильное слово в буфер")
+                TextInserter.shared.copyOnly(right)
+            }
             // В словарь — только если правило не испортит другие фразы: левая часть не
             // обычное русское слово (или замена — название/аббревиатура). Та же проверка,
             // что у ревизии словаря.
-            let safe = !DictionaryAudit.isRealRussian(wrong) || DictionaryAudit.looksLikeProperNameFix(wrong: wrong, right: right)
-            if safe {
-                CorrectionStore.shared.addManual(wrong: wrong, right: right, contextBefore: nil)
-                DebugLog.log("QuickFix: «\(wrong)» → «\(right)» — в словаре")
-                HUDManager.shared.showQuickFixResult(wrong: wrong, right: right, learned: true)
-            } else {
-                DebugLog.log("QuickFix: «\(wrong)» → «\(right)» — заменено, в словарь не добавлено (обычное слово)")
-                HUDManager.shared.showQuickFixResult(wrong: wrong, right: right, learned: false)
-            }
+            let learned = !DictionaryAudit.isRealRussian(wrong) || DictionaryAudit.looksLikeProperNameFix(wrong: wrong, right: right)
+            if learned { CorrectionStore.shared.addManual(wrong: wrong, right: right, contextBefore: nil) }
+            DebugLog.log("QuickFix: «\(wrong)» → «\(right)» — заменено: \(replaced), в словаре: \(learned)")
+            HUDManager.shared.showQuickFixResult(wrong: wrong, right: right, learned: learned, replaced: replaced)
         }
     }
 }
