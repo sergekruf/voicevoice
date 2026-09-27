@@ -85,6 +85,7 @@ struct ResultHUD: View {
         switch controller.lastPasteOutcome {
         case .pasted: return "checkmark.circle.fill"
         case .pastedNoAutoLearn: return "checkmark.circle.fill"
+        case .pastedKeptInClipboard: return "doc.on.clipboard"
         case .clipboardOnly: return "text.cursor.ibeam"
         case .failed: return "exclamationmark.triangle.fill"
         case .skipped: return "doc.on.clipboard"
@@ -96,6 +97,7 @@ struct ResultHUD: View {
         switch controller.lastPasteOutcome {
         case .pasted: return .green
         case .pastedNoAutoLearn: return .green
+        case .pastedKeptInClipboard: return .cyan
         case .clipboardOnly: return .cyan
         case .failed: return .yellow
         case .skipped: return .gray
@@ -107,6 +109,7 @@ struct ResultHUD: View {
         switch controller.lastPasteOutcome {
         case .pasted: return "Вставлено"
         case .pastedNoAutoLearn: return "Вставлено"
+        case .pastedKeptInClipboard: return "Текст ещё и в буфере"
         case .clipboardOnly: return "Поле ввода не найдено"
         case .failed: return "Авто-вставка не сработала"
         case .skipped: return "Скопировано в буфер"
@@ -118,6 +121,7 @@ struct ResultHUD: View {
         switch controller.lastPasteOutcome {
         case .pasted: return nil
         case .pastedNoAutoLearn: return "Если текст не появился в поле — «Копировать» и вставь ⌘V. Автообучение здесь недоступно: исправления — через Edit & Learn."
+        case .pastedKeptInClipboard: return "Во время диктовки курсор мог уйти из поля. Если текст не вставился — поставь курсор и нажми ⌘V."
         case .clipboardOnly: return "Поставь курсор в нужное поле и нажми ⌘V — текст в буфере"
         case .failed: return "Нажми ⌘V в активном поле — текст в буфере"
         case .skipped: return "Авто-вставка отключена в настройках"

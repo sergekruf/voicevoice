@@ -6,6 +6,7 @@ enum PasteOutcome: Equatable {
     case pending             // paste task just started, no result yet
     case pasted              // text landed in an AX-verifiable editable field; auto-learn watcher will track edits
     case pastedNoAutoLearn   // tier 1 was trusted in an AX-unreadable app; auto-learn watcher CAN'T run → surface HUD with manual Edit & Learn
+    case pastedKeptInClipboard // AX-unreadable app, but during dictation the user clicked / switched apps — the caret may have left the field: ⌘V sent AND text left in clipboard
     case clipboardOnly       // no editable field — text dropped into clipboard, hint shown
     case failed              // editable field, but all paste tiers couldn't deliver — text in clipboard
     case skipped             // empty text — nothing to paste
@@ -84,12 +85,110 @@ final class TextInserter {
 
     /// Asynchronous paste. Returns the outcome so the caller can update its UI state
     /// (typically `AppController.lastPasteOutcome` → reflected in the unified ResultHUD).
-    func paste(_ text: String) async -> PasteOutcome {
+    /// - focusMayHaveMoved: во время диктовки был клик мышью или смена приложения —
+    ///   курсор мог уйти из поля. Для приложений, где поле не проверить, текст тогда
+    ///   остаётся в буфере (иначе он терялся бы молча).
+    func paste(_ text: String, focusMayHaveMoved: Bool = false) async -> PasteOutcome {
         let frontApp = NSWorkspace.shared.frontmostApplication
         let frontName = frontApp?.localizedName ?? "?"
         let frontBundle = frontApp?.bundleIdentifier ?? "?"
-        DebugLog.log("Paste: length=\(text.count), front=\(frontName) [\(frontBundle)]")
-        return await runPasteChain(text: text, bundleID: frontBundle)
+        DebugLog.log("Paste: length=\(text.count), front=\(frontName) [\(frontBundle)], focusMayHaveMoved=\(focusMayHaveMoved)")
+        Self.prepareAccessibility(for: frontApp)
+        return await runPasteChain(text: text, bundleID: frontBundle, focusMayHaveMoved: focusMayHaveMoved)
+    }
+
+    // MARK: - Где курсор: поле ввода есть или нет
+
+    /// Приложения на Electron (Claude, Slack, VS Code…) прячут дерево доступности, пока
+    /// их не попросят флагом `AXManualAccessibility` — так делают Grammarly и менеджеры
+    /// окон. После флага видно поле ввода и его текст: вставку можно проверить, а
+    /// отсутствие поля — отличить от «не видно». Флаг ставится один раз на процесс;
+    /// приложения, которые его не знают (Qt, Chromium-браузеры), отвечают ошибкой — ок.
+    private static var accessibilityRequestedPIDs = Set<pid_t>()
+
+    static func prepareAccessibility(for app: NSRunningApplication?) {
+        guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              !accessibilityRequestedPIDs.contains(app.processIdentifier) else { return }
+        accessibilityRequestedPIDs.insert(app.processIdentifier)
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        let r = AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        DebugLog.log("Paste: AXManualAccessibility для \(app.bundleIdentifier ?? "?") → \(r == .success ? "включено" : "не поддерживается")")
+    }
+
+    /// Прямой запрос «где фокус» у Electron-приложений пуст даже с деревом доступности,
+    /// но само поле помечено `AXFocused`. Ищем его обходом активного окна (окно Claude —
+    /// ~450 узлов, ~30 мс) с ограничением по числу узлов и времени.
+    /// `windowHasFields` — в окне видны текстовые поля (дерево доступности открыто), но
+    /// ни одно не в фокусе: курсор точно не в поле, даже без статистики по приложению.
+    private static func findFocusedTextElement(pid: pid_t) -> (field: AXUIElement?, windowHasFields: Bool) {
+        let app = AXUIElementCreateApplication(pid)
+        var winRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
+              let win = winRef else { return (nil, false) }
+        let textRoles: Set<String> = [kAXTextFieldRole as String, kAXTextAreaRole as String,
+                                      kAXComboBoxRole as String, "AXSearchField"]
+        let deadline = Date().addingTimeInterval(0.15)
+        var visited = 0
+        var sawField = false
+        func attr(_ e: AXUIElement, _ a: String) -> CFTypeRef? {
+            var v: CFTypeRef?
+            return AXUIElementCopyAttributeValue(e, a as CFString, &v) == .success ? v : nil
+        }
+        func search(_ e: AXUIElement, depth: Int) -> AXUIElement? {
+            visited += 1
+            if visited > 3000 || depth > 80 || Date() > deadline { return nil }
+            if let role = attr(e, kAXRoleAttribute as String) as? String, textRoles.contains(role) {
+                sawField = true
+                if (attr(e, kAXFocusedAttribute as String) as? Bool) == true { return e }
+            }
+            for child in (attr(e, kAXChildrenAttribute as String) as? [AXUIElement]) ?? [] {
+                if let found = search(child, depth: depth + 1) { return found }
+            }
+            return nil
+        }
+        let found = search(win as! AXUIElement, depth: 0)
+        DebugLog.log("Paste: обход окна — \(visited) узлов, поле в фокусе: \(found != nil), поля в окне: \(sawField)")
+        return (found, sawField)
+    }
+
+    /// Надёжно ли приложение показывает своё поле ввода. Считаем по истории: если почти
+    /// всегда (≥90%, минимум 5 раз) поле было видно, то «фокуса нет» в нём означает, что
+    /// курсор действительно не в поле. У Qt/браузеров (MAX, Яндекс) поле видно редко —
+    /// там «не видно» ничего не значит, и мы по-прежнему вставляем вслепую.
+    private static let focusStatsKey = "axFocusStats"
+
+    /// Приложения на Electron, Chromium (Chrome, Яндекс, ChatGPT, Bitrix24) и Qt (MAX)
+    /// прячут поле ввода от служб доступности — «фокуса нет» в них ничего не значит.
+    /// Обычные приложения macOS показывают поле всегда. Узнаём по составу пакета.
+    private static var hidesFieldsCache: [String: Bool] = [:]
+
+    private static func hidesFields(_ app: NSRunningApplication?) -> Bool {
+        guard let app, let url = app.bundleURL else { return true }
+        let key = app.bundleIdentifier ?? url.path
+        if let cached = hidesFieldsCache[key] { return cached }
+        let frameworks = (try? FileManager.default.contentsOfDirectory(
+            atPath: url.appendingPathComponent("Contents/Frameworks").path)) ?? []
+        let hides = frameworks.contains { name in
+            name == "QtCore.framework" || name.hasSuffix(" Framework.framework")   // Electron, Chromium, CEF
+                || name == "Chromium Embedded Framework.framework"
+        }
+        hidesFieldsCache[key] = hides
+        DebugLog.log("Paste: \(key) — \(hides ? "Electron/Chromium/Qt, поле может быть скрыто" : "обычное приложение macOS")")
+        return hides
+    }
+
+    private static func recordFocus(bundleID: String, visible: Bool) {
+        var stats = UserDefaults.standard.dictionary(forKey: focusStatsKey) as? [String: [Int]] ?? [:]
+        var s = stats[bundleID] ?? [0, 0]
+        if visible { s[0] += 1 } else { s[1] += 1 }
+        stats[bundleID] = s
+        UserDefaults.standard.set(stats, forKey: focusStatsKey)
+    }
+
+    private static func showsFieldsReliably(bundleID: String) -> Bool {
+        let stats = UserDefaults.standard.dictionary(forKey: focusStatsKey) as? [String: [Int]] ?? [:]
+        guard let s = stats[bundleID] else { return false }
+        return s[0] >= 5 && Double(s[0]) >= 0.9 * Double(s[0] + s[1])
     }
 
     func copyOnly(_ text: String) {
@@ -97,9 +196,33 @@ final class TextInserter {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    private func runPasteChain(text: String, bundleID: String) async -> PasteOutcome {
-        let focusedElement = Self.copyFocusedElement()
-        let editability = Self.classifyFocus(focusedElement)
+    private func runPasteChain(text: String, bundleID: String, focusMayHaveMoved: Bool) async -> PasteOutcome {
+        var focusedElement = Self.copyFocusedElement()
+        let noFocusAtAll = focusedElement == nil
+        var editability = Self.classifyFocus(focusedElement)
+        let hidesFields = Self.hidesFields(NSWorkspace.shared.frontmostApplication)
+        var windowHasFields = false
+        if editability == .axUnreadable, let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+            let found = Self.findFocusedTextElement(pid: pid)
+            windowHasFields = found.windowHasFields
+            if let field = found.field {
+                focusedElement = field
+                editability = .editable
+            }
+        }
+        if editability != .notEditable {
+            Self.recordFocus(bundleID: bundleID, visible: editability == .editable)
+        }
+        // Поля точно нет: обычное приложение без фокуса вовсе; окно Electron, где поля
+        // видны, но ни одно не в фокусе; приложение, которое обычно показывает поле.
+        if editability == .axUnreadable,
+           (!hidesFields && noFocusAtAll) || windowHasFields || Self.showsFieldsReliably(bundleID: bundleID) {
+            DebugLog.log("Paste: поля ввода нет (\(bundleID)) → только буфер")
+            editability = .notEditable
+        }
+        // Обычное приложение, но фокус на чём-то непонятном (окно, веб-область, группа):
+        // ⌘V пробуем, но текст оставляем и в буфере.
+        let uncertain = editability == .axUnreadable && (!hidesFields || focusMayHaveMoved)
         DebugLog.log("Paste: focus classification = \(editability)")
 
         if editability == .notEditable {
@@ -151,6 +274,14 @@ final class TextInserter {
             // текст ВТОРОЙ раз (жалоба пользователя). Если вставка вдруг не
             // долетела (редкий случай в этом классе приложений) — в HUD есть
             // кнопка «Копировать».
+            if uncertain {
+                // Курсор мог уйти из поля (клик или смена приложения во время диктовки)
+                // или фокус в обычном приложении на непонятном элементе — проверить
+                // нечем. Текст оставляем в буфере обычной записью.
+                DebugLog.log("Paste: AX unverifiable + uncertain focus (moved=\(focusMayHaveMoved)) — ⌘V sent, text KEPT in clipboard")
+                writePlainText(text)
+                return .pastedKeptInClipboard
+            }
             DebugLog.log("Paste: AX unverifiable — trusting tier1; restoring clipboard (HUD with Edit & Learn)")
             await finalizeAfterPaste(savedClipboard: savedClipboard)
             return .pastedNoAutoLearn

@@ -43,6 +43,11 @@ final class AppController: ObservableObject {
     /// Аудио текущей диктовки для архива проверки качества (только при включённом
     /// «Сохранять аудио диктовок»); пишется после появления id записи в истории.
     private var pendingArchiveAudio: [Float]?
+    /// Мог ли курсор уйти из поля за время диктовки: клик мышью или смена приложения.
+    /// Нужно для приложений, где поле ввода не проверить (см. TextInserter.paste).
+    private var pressFrontPID: pid_t?
+    private var clickedDuringRecording = false
+    private var clickMonitor: Any?
     private var warmIdleTimer: Timer?
 
     private init() {
@@ -290,6 +295,7 @@ final class AppController: ObservableObject {
             state = .recording(level: 0)
             HUDManager.shared.showRecording()
             installEscMonitor()
+            startFocusTracking()
             // Живой черновик в HUD — лёгкий превью-цикл движка (распознаёт весь
             // буфер на отпускании, превью — только для показа).
             // Живой черновик включён всегда (тоггл убран как лишний).
@@ -321,6 +327,30 @@ final class AppController: ObservableObject {
     /// (can't consume the event), so Esc also reaches the frontmost app — acceptable,
     /// since during dictation the user isn't typing into it. Both global (other apps
     /// focused) and local (our own window focused) are needed to catch Esc anywhere.
+    /// Запоминаем приложение на старте записи и ловим клики мышью до отпускания клавиши.
+    /// Заодно просим Electron-приложение открыть дерево доступности — к моменту вставки
+    /// поле ввода будет видно.
+    private func startFocusTracking() {
+        let front = NSWorkspace.shared.frontmostApplication
+        pressFrontPID = front?.processIdentifier
+        clickedDuringRecording = false
+        TextInserter.prepareAccessibility(for: front)
+        if let m = clickMonitor { NSEvent.removeMonitor(m) }
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.clickedDuringRecording = true
+        }
+    }
+
+    private func stopFocusTracking() {
+        if let m = clickMonitor { NSEvent.removeMonitor(m) }
+        clickMonitor = nil
+    }
+
+    private var focusMayHaveMoved: Bool {
+        clickedDuringRecording
+            || (pressFrontPID != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier != pressFrontPID)
+    }
+
     private func installEscMonitor() {
         removeEscMonitor()
         escMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -353,6 +383,7 @@ final class AppController: ObservableObject {
         case .recording:
             DebugLog.log("App: dictation cancelled via Esc")
             SystemAudioMuter.shared.restore()
+            stopFocusTracking()
             recorder.cancel()
         case .transcribing:
             DebugLog.log("App: transcription cancelled via Esc")
@@ -379,6 +410,7 @@ final class AppController: ObservableObject {
         // Esc monitors intentionally stay installed: Esc can also cancel the
         // transcription phase (see cancelDictation). Removed when finalize runs.
         SystemAudioMuter.shared.restore()   // звук возвращаем сразу, не дожидаясь распознавания
+        stopFocusTracking()
         let samples = recorder.stop()
         let duration = Double(samples.count) / AudioRecorder.targetSampleRate
         pendingArchiveAudio = settings.keepDictationAudio ? samples : nil
@@ -490,9 +522,11 @@ final class AppController: ObservableObject {
 
         if !appliedText.isEmpty {
             let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            let focusMoved = focusMayHaveMoved
+            if focusMoved { DebugLog.log("App: за время диктовки был клик или смена приложения") }
             Task { [weak self] in
                 guard let self else { return }
-                let outcome = await self.inserter.paste(appliedText)
+                let outcome = await self.inserter.paste(appliedText, focusMayHaveMoved: focusMoved)
                 await MainActor.run {
                     self.lastPasteOutcome = outcome
                     // Verified paste (`.pasted`) needs no HUD — the user sees the text in the field
@@ -502,7 +536,13 @@ final class AppController: ObservableObject {
                     //   • pastedNoAutoLearn → paste worked but watcher can't track edits in this app
                     //     (Max / Bitrix24 / Termius / Slack…); Edit & Learn is the only way to teach
                     //     corrections to the dictionary.
-                    if outcome != .pasted {
+                    switch outcome {
+                    case .pasted: break
+                    case .clipboardOnly, .failed, .pastedKeptInClipboard:
+                        // Текст в буфере — об этом нужно сказать даже в тихом режиме,
+                        // иначе он выглядит пропавшим.
+                        HUDManager.shared.showClipboardNotice(record: record, outcome: outcome)
+                    default:
                         HUDManager.shared.showResult(record: record)
                     }
                     if outcome == .pasted {

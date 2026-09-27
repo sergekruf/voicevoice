@@ -312,6 +312,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
 
+        // Скрытый отладочный режим: `VoiceVoice --paste-test "текст" only=<bundle id> [moved]` —
+        // через 4 с вставляет текст (как после диктовки) и печатает исход и содержимое
+        // буфера. Вставляет ТОЛЬКО если активно указанное приложение — иначе текст ушёл бы
+        // в то, чем пользователь занят в этот момент. `moved` — как будто был клик.
+        if let idx = CommandLine.arguments.firstIndex(of: "--paste-test"),
+           idx + 1 < CommandLine.arguments.count {
+            let text = CommandLine.arguments[idx + 1]
+            let moved = CommandLine.arguments.contains("moved")
+            let only = CommandLine.arguments.first { $0.hasPrefix("only=") }.map { String($0.dropFirst(5)) }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                let frontApp = NSWorkspace.shared.frontmostApplication
+                guard let only, frontApp?.bundleIdentifier == only else {
+                    print("PASTE-TEST отменён: активно \(frontApp?.bundleIdentifier ?? "?"), ожидалось \(only ?? "(не указано only=)")")
+                    exit(1)
+                }
+                let front = frontApp?.localizedName ?? "?"
+                let outcome = await TextInserter.shared.paste(text, focusMayHaveMoved: moved)
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                let clip = NSPasteboard.general.string(forType: .string) ?? "(пусто)"
+                print("PASTE-TEST front=\(front) outcome=\(outcome) clipboard=\(clip == text ? "НАШ ТЕКСТ" : "прежнее: " + String(clip.prefix(40)))")
+                exit(0)
+            }
+            return
+        }
+
         // Скрытый отладочный режим: `VoiceVoice --update-test [install]` — проверка
         // обновления без кликов по меню и без алертов (с `install` — полный цикл:
         // скачивание DMG + установка в /Applications, БЕЗ перезапуска). Текущую

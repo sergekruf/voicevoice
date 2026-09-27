@@ -56,6 +56,19 @@ final class HUDManager {
 
     func hideResult() { resultPanel?.orderOut(nil) }
 
+    /// Текст оказался в буфере обмена (поля нет, вставка не прошла или курсор мог уйти из
+    /// поля). Обычный режим — полный HUD результата; тихий — короткая подсказка: это не
+    /// уведомление «для красоты», без него текст выглядит пропавшим.
+    func showClipboardNotice(record: TranscriptionRecord, outcome: PasteOutcome) {
+        hideRecording()
+        if !isQuiet {
+            present(view: ResultHUD(record: record), ref: &resultPanel, size: NSSize(width: 520, height: 160), autohide: 7.0)
+            return
+        }
+        let kept = outcome == .pastedKeptInClipboard
+        present(view: NoFieldHint(kept: kept), ref: &resultPanel, size: NSSize(width: 520, height: 90), autohide: 6.0)
+    }
+
     // MARK: - Learned-correction toast
 
     func showLearned(corrections: [(wrong: String, right: String)]) {
