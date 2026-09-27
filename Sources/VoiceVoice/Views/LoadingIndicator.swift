@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct LoadingIndicator: View {
-    @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
     @ObservedObject private var settings = AppSettings.shared
@@ -10,7 +9,6 @@ struct LoadingIndicator: View {
     /// и при загрузке Parakeet/GigaAM прогресс не показывался.
     private var state: Transcriber.ModelState {
         switch settings.sttEngine {
-        case .whisperKit: return transcriber.state
         case .parakeet: return parakeet.state
         case .gigaAM: return gigaam.state
         }

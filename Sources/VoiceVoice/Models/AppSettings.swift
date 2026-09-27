@@ -17,56 +17,29 @@ enum HotkeyKind: String, CaseIterable, Identifiable {
     }
 }
 
-/// Движок распознавания речи. WhisperKit — дефолт (Whisper на ANE). Parakeet —
-/// опциональный быстрый движок на NVIDIA Parakeet TDT v3 через FluidAudio (модель
-/// ~600 МБ качается только при выборе).
+/// Движок распознавания речи. GigaAM — русский, лучшее качество (знаки и числа ставит
+/// сам). Parakeet TDT v3 через FluidAudio — быстрый, 25 европейских языков. Модель
+/// каждого качается при первом выборе. (WhisperKit убран в 1.1.8: медленнее, выдумывал
+/// текст на тишине, по-русски хуже GigaAM, а другие языки закрывает Parakeet.)
 enum STTEngine: String, CaseIterable, Identifiable {
-    case whisperKit = "whisperKit"
     case parakeet = "parakeet"
-    /// GigaAM-v3 e2e_ctc — русскоязычная SOTA (пунктуация и нормализация встроены).
-    /// Экспериментально: модель конвертируется локально (.mltools/convert_gigaam.py)
-    /// и в настройках видна только если установлена.
+    /// GigaAM-v3 e2e_rnnt — русскоязычная SOTA (пунктуация и нормализация встроены).
     case gigaAM = "gigaAM"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .whisperKit: return "WhisperKit (Whisper, классический)"
-        case .parakeet: return "Parakeet TDT v3 (по умолчанию, быстрый)"
-        case .gigaAM: return "GigaAM v3 (русский, эксперимент)"
+        case .parakeet: return "Parakeet TDT v3 (быстрый, 25 языков)"
+        case .gigaAM: return "GigaAM v3 (русский, лучшее качество)"
         }
     }
 
     /// Имя для подписей в интерфейсе, где длинное не помещается.
     var shortName: String {
         switch self {
-        case .whisperKit: return "Whisper"
         case .parakeet: return "Parakeet"
         case .gigaAM: return "GigaAM"
-        }
-    }
-}
-
-/// WhisperKit composes a folder-matching glob `*openai*{rawValue}/*` against
-/// argmaxinc/whisperkit-coreml on HuggingFace, so `rawValue` must be the model
-/// folder name WITHOUT the `openai_whisper-` prefix.
-enum WhisperModelChoice: String, CaseIterable, Identifiable {
-    case largeV3TurboQuantized = "large-v3-v20240930_turbo_632MB"
-    case largeV3Turbo = "large-v3-v20240930_turbo"
-    case largeV3 = "large-v3-v20240930"
-    case medium = "medium"
-    case small = "small"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .largeV3TurboQuantized: return "large-v3-turbo, 4-bit (рекомендуется, ~632 МБ)"
-        case .largeV3Turbo: return "large-v3-turbo (full precision, ~1.5 ГБ)"
-        case .largeV3: return "large-v3 (макс. качество, без turbo, ~1.5 ГБ)"
-        case .medium: return "medium (~770 МБ)"
-        case .small: return "small (~480 МБ)"
         }
     }
 }
@@ -95,34 +68,30 @@ enum DictionaryCheckSchedule: String, CaseIterable, Identifiable {
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
-    @AppStorage("modelName") var modelName: String = WhisperModelChoice.largeV3TurboQuantized.rawValue
-    /// Active speech-to-text engine. Default is Parakeet since 1.1.1 (faster, lighter,
-    /// recognition on par with Whisper for Russian). See `STTEngine`. Existing users keep
-    /// whatever they already selected — this default only applies to fresh installs.
+    /// Active speech-to-text engine. Default is Parakeet since 1.1.1 (works for any of its
+    /// 25 languages out of the box). See `STTEngine`. Existing users keep whatever they
+    /// already selected — this default only applies to fresh installs.
     @AppStorage("sttEngine") var sttEngineRaw: String = STTEngine.parakeet.rawValue
     @AppStorage("hotkey") var hotkeyRaw: String = HotkeyKind.fn.rawValue
-    @AppStorage("language") var language: String = "ru"
     @AppStorage("onboardingDone") var onboardingDone: Bool = false
     @AppStorage("minConfirmedToApply") var minConfirmedToApply: Int = 1
     /// Whether the dictionary applies fuzzy phrase matching (Levenshtein on normalized text).
     @AppStorage("fuzzyMatching") var fuzzyMatching: Bool = true
     /// Сохранять аудио диктовок локально для проверки качества распознавания (AudioArchive).
+    /// Скрытая настройка разработчика, в интерфейсе нет: по умолчанию выключена —
+    /// записи голоса (~50 МБ в день) не должны копиться у пользователей без спроса.
+    /// Включить: `defaults write com.sergekruf.voicevoice keepDictationAudio -bool true`.
     @AppStorage("keepDictationAudio") var keepDictationAudio: Bool = false
-    /// GigaAM: ширина поиска при декодировании (1 — жадный, как раньше) и подсказка
-    /// движку терминов из словаря правок (RNNTBeamSearch).
-    @AppStorage("gigaamBeamSize") var gigaamBeamSize: Int = 4
-    @AppStorage("gigaamHotwords") var gigaamHotwords: Bool = true
     /// Maximum allowed Levenshtein-distance / max-length ratio for a fuzzy match (0..1).
-    @AppStorage("fuzzyThreshold") var fuzzyThreshold: Double = 0.25
+    /// 15%: одна буква в словах до 10 букв, две — в более длинных.
+    @AppStorage("fuzzyThreshold") var fuzzyThreshold: Double = 0.15
     /// Persistent counter of dictionary substitutions ever applied (exact + fuzzy).
     @AppStorage("totalSubstitutions") var totalSubstitutions: Int = 0
     /// Of those, how many were fuzzy matches.
     @AppStorage("fuzzySubstitutions") var fuzzySubstitutions: Int = 0
-    /// Unix timestamp of the last time WhisperKit finished `load()` successfully. Used by
-    /// the Dashboard to communicate whether the *next* load will be quick (ANE-warm) or slow.
+    /// Unix timestamp of the last time the engine finished `load()` successfully.
     @AppStorage("lastSuccessfulLoadAt") var lastSuccessfulLoadAt: Double = 0
-    /// Whisper "model display id" of the last successful load — if it differs from the
-    /// current `modelName`, the next load is "first time for this model" (slow).
+    /// Id of the model that loaded last (e.g. "gigaam-v3-e2e-rnnt").
     @AppStorage("lastSuccessfulModelId") var lastSuccessfulModelId: String = ""
     /// CoreAudio device UID for the chosen input mic. Empty string = follow system default.
     @AppStorage("inputDeviceUID") var inputDeviceUID: String = ""
@@ -132,23 +101,6 @@ final class AppSettings: ObservableObject {
     /// If true (default), after a verified paste we monitor the focused field for ~5 min
     /// and learn user edits into the dictionary as wrong→right corrections.
     @AppStorage("autoLearnCorrections") var autoLearnCorrections: Bool = true
-    /// If true (default OFF, opt-in), restore punctuation + capitalization with the
-    /// on-device RUPunct neural model instead of the regex `PunctuationFixer`. Better
-    /// for Parakeet (which omits punctuation on long audio); loads a ~56 МБ Core ML
-    /// model on first use. Experimental.
-    @AppStorage("punctuationModel") var punctuationModel: Bool = false
-    /// If true (default OFF, opt-in), fix recognition errors (spelling, punctuation,
-    /// casing) with the on-device sage-fredt5-95m seq2seq model (SberDevices, MIT).
-    /// Downloads ~230 МБ once on first enable. Runs after punctuation restore and
-    /// before the correction dictionary. Russian only. Experimental.
-    @AppStorage("sageCorrector") var sageCorrector: Bool = false
-    /// «Глубокая чистка (LLM)»: Qwen3-1.7B через MLX правит ошибки распознавания по
-    /// контексту абзаца (омофоны, ослышки, потерянные точки, заглавные на стыках).
-    /// ~1 ГБ на диске, ~1.2 ГБ в памяти пока загружена, ~1 с на абзац — строго opt-in.
-    @AppStorage("llmEditor") var llmEditor: Bool = false
-    /// Через сколько минут без диктовок выгружать LLM из памяти (0 = никогда).
-    /// Обратно грузится на нажатии клавиши диктовки, во время записи.
-    @AppStorage("llmIdleUnloadMinutes") var llmIdleUnloadMinutes: Int = 10
     /// Автопроверка словаря правок: ревизия (что пора удалить) + разбор диктовок
     /// (что стоит добавить). Ничего не меняет сама — показывает тост с находками.
     @AppStorage("dictionaryCheckSchedule") var dictionaryCheckScheduleRaw: String =
@@ -159,16 +111,6 @@ final class AppSettings: ObservableObject {
     var dictionaryCheckSchedule: DictionaryCheckSchedule {
         DictionaryCheckSchedule(rawValue: dictionaryCheckScheduleRaw) ?? .weekly
     }
-    /// If true (default ON), post-process Whisper's sentence-final punctuation
-    /// with simple Russian rules: «ли»-particle and question-word starts force
-    /// `?`; long sentences without question markers ending in `?` get `.`. See
-    /// PunctuationFixer.swift.
-    @AppStorage("fixPunctuation") var fixPunctuation: Bool = true
-    /// If true (default ON), transcribe completed VAD chunks in the background WHILE
-    /// recording, so on key-release only the short trailing tail remains to decode —
-    /// long dictations feel near-instant. Output is identical to batch mode (same
-    /// silence-cut boundaries); this only changes WHEN chunks are decoded. Turn off
-    /// to revert to "transcribe everything on release".
     /// Приглушать системный звук (музыку/видео) на время записи, чтобы он не
     /// попадал в микрофон. Состояние вывода восстанавливается на отпускании клавиши.
     @AppStorage("muteSystemAudioOnRecord") var muteSystemAudioOnRecord: Bool = false
@@ -205,13 +147,27 @@ final class AppSettings: ObservableObject {
     }
 
     var sttEngine: STTEngine {
-        STTEngine(rawValue: sttEngineRaw) ?? .whisperKit
+        STTEngine(rawValue: sttEngineRaw) ?? .parakeet
     }
 
+    /// Ключи удалённых функций (WhisperKit, нейро-пунктуация RUPunct, Sage, LLM,
+    /// старые правила знаков, давно убранные тумблеры) — вычищаются из настроек.
+    static let obsoleteKeys = [
+        "modelName", "language", "punctuationModel", "sageCorrector", "llmEditor",
+        "llmIdleUnloadMinutes", "fixPunctuation", "eagerTranscription", "eagerLoad",
+        "autoEmoji", "autoFormat", "keepClipboard", "alwaysKeepInClipboard", "punctuationPrompt",
+        "gigaamBeamSize", "gigaamHotwords",
+    ]
+
     private init() {
-        if WhisperModelChoice(rawValue: modelName) == nil {
-            modelName = WhisperModelChoice.largeV3TurboQuantized.rawValue
+        // Пользователи Whisper переезжают на GigaAM (все они диктовали по-русски:
+        // язык по умолчанию был «ru»), остальные языки — на Parakeet.
+        let d = UserDefaults.standard
+        if d.string(forKey: "sttEngine") == "whisperKit" {
+            let lang = d.string(forKey: "language") ?? "ru"
+            sttEngineRaw = lang == "ru" ? STTEngine.gigaAM.rawValue : STTEngine.parakeet.rawValue
         }
+        for key in Self.obsoleteKeys where d.object(forKey: key) != nil { d.removeObject(forKey: key) }
         // Older versions defaulted minConfirmedToApply=2. Move existing users to 1
         // (apply right after first edit) — that's the new product behaviour.
         if !UserDefaults.standard.bool(forKey: "minConfirmedMigrated") {

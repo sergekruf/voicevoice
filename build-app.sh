@@ -18,18 +18,10 @@ STAGE_DIR="/tmp/voicevoice-build-$$"
 APP_DIR="$STAGE_DIR/${APP_NAME}.app"
 trap 'rm -rf "$STAGE_DIR"' EXIT
 
-# Swift 6.4 (Xcode 27) по умолчанию собирает через swiftbuild, а тот сам компилирует
-# .metal-файлы mlx-swift и требует отдельный Metal Toolchain. Ядра MLX мы берём
-# готовыми (см. ниже), поэтому остаёмся на прежней системе сборки.
-BUILD_SYSTEM=()
-if swift build --help 2>/dev/null | grep -q -- '--build-system'; then
-    BUILD_SYSTEM=(--build-system native)
-fi
-
 echo "==> Building Swift package ($CONFIG)…"
-swift build -c "$CONFIG" --arch arm64 "${BUILD_SYSTEM[@]}"
+swift build -c "$CONFIG" --arch arm64
 
-BIN_PATH="$(swift build -c "$CONFIG" --arch arm64 "${BUILD_SYSTEM[@]}" --show-bin-path)/$APP_NAME"
+BIN_PATH="$(swift build -c "$CONFIG" --arch arm64 --show-bin-path)/$APP_NAME"
 if [[ ! -f "$BIN_PATH" ]]; then
     echo "Binary not found at $BIN_PATH"; exit 1
 fi
@@ -49,17 +41,6 @@ BIN_DIR="$(dirname "$BIN_PATH")"
 for r in "$BIN_DIR"/*.bundle; do
     [[ -d "$r" ]] && cp -R "$r" "$APP_DIR/Contents/Resources/"
 done
-
-# Metal-ядра MLX (LLM-постредактор). `swift build` их не компилирует — готовый
-# metallib берётся из колеса mlx-metal той же версии ядра, см.
-# .mltools/fetch_mlx_metallib.sh. Без него MLX падает на первом обращении
-# («Failed to load the default metallib»), поэтому отсутствие — ошибка сборки.
-MLX_BUNDLE="$PROJECT_DIR/.mltools/mlx-swift_Cmlx.bundle"
-if [[ ! -f "$MLX_BUNDLE/default.metallib" ]]; then
-    echo "❌ Нет $MLX_BUNDLE/default.metallib — запустите .mltools/fetch_mlx_metallib.sh"
-    exit 1
-fi
-cp -R "$MLX_BUNDLE" "$APP_DIR/Contents/Resources/"
 
 printf "APPL????" > "$APP_DIR/Contents/PkgInfo"
 

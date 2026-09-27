@@ -77,16 +77,15 @@ final class HUDManager {
     }
 
     /// Итог автопроверки словаря (по расписанию из настроек).
-    func showDictionaryCheck(auditCount: Int, candidateCount: Int) {
+    func showDictionaryCheck(auditCount: Int) {
         if isQuiet { return }
-        guard auditCount > 0 || candidateCount > 0 else { return }
-        let rows = (auditCount > 0 ? 1 : 0) + (candidateCount > 0 ? 1 : 0)
+        guard auditCount > 0 else { return }
+        let rows = 1
         let onOpen: () -> Void = { [weak self] in
             WindowOpener.openDictionary()
             self?.dictionaryCheckPanel?.orderOut(nil)
         }
-        present(view: DictionaryCheckToast(auditCount: auditCount,
-                                           candidateCount: candidateCount, onOpen: onOpen),
+        present(view: DictionaryCheckToast(auditCount: auditCount, onOpen: onOpen),
                 ref: &dictionaryCheckPanel,
                 size: NSSize(width: 520, height: CGFloat(52 + rows * 20)), autohide: 8.0)
     }

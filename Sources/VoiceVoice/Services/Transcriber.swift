@@ -1,11 +1,11 @@
 import Foundation
-import WhisperKit
-import Combine
+import Accelerate
 
+/// Общая часть всех движков распознавания: состояние модели, нарезка длинной записи
+/// на куски по паузам, склейка текстов кусков, сверка стыков и блоклист галлюцинаций.
+/// (Раньше здесь же жил движок WhisperKit; его убрали — остались GigaAM и Parakeet.)
 @MainActor
-final class Transcriber: ObservableObject {
-    static let shared = Transcriber()
-
+enum Transcriber {
     enum ModelState: Equatable {
         case notLoaded
         case downloading(progress: Double)
@@ -14,392 +14,47 @@ final class Transcriber: ObservableObject {
         case error(String)
     }
 
-    @Published private(set) var state: ModelState = .notLoaded
-    @Published private(set) var lastProcessingMs: Int = 0
-    /// Draft text of the current dictation, updated as eager-streaming chunks commit
-    /// (~every 12 s of speech). Shown live in the recording HUD; cleared by
-    /// AppController when the dictation finishes or is cancelled.
-    @Published private(set) var livePreviewText: String = ""
+    /// Детектор речи по громкости — тот же алгоритм, что EnergyVAD из WhisperKit, на
+    /// котором настраивались пороги нарезки: RMS каждого кадра 0,1 с против порога 0,02.
+    struct EnergyVAD {
+        let frameLengthSamples = 1600
+        let energyThreshold: Float = 0.02
 
-    private var pipeline: WhisperKit?
-    private var loadingTask: Task<Void, Never>?
-
-    // ── Eager streaming state ────────────────────────────────────────────────
-    // While recording, we transcribe completed VAD chunks in the background so
-    // that on key-release only the trailing (uncommitted) audio remains to decode.
-    // See startStreaming / finishStreaming.
-    private var streamTask: Task<Void, Never>?
-    private var streamPieces: [(text: String, realPauseAfter: Bool)] = []
-    private var streamCommittedOffset: Int = 0
-    private var streamingActive = false
-    /// Session generation. Bumped by startStreaming/cancelStreaming so an in-flight
-    /// chunk decode from a CANCELLED session can't commit its text/offset into the
-    /// next session after its `await` resumes. finishStreaming intentionally does
-    /// NOT bump it — there the in-flight chunk must still commit.
-    private var streamGeneration = 0
-    /// Accumulated decode wall-time across all eager chunks of the current session,
-    /// so `lastProcessingMs` reflects total compute (not just the tail) for the
-    /// Dashboard's RTF stat.
-    private var streamDecodeMs: Int = 0
-
-    private let settings = AppSettings.shared
-
-    private init() {}
-
-    func ensureLoaded() {
-        if case .ready = state { return }
-        if loadingTask != nil { return }
-        loadingTask = Task { await load() }
-    }
-
-    private func load() async {
-        state = .loading
-        let modelName = settings.modelName
-        let repo = "argmaxinc/whisperkit-coreml"
-        DebugLog.log("Transcriber: load() begin for model=\(modelName)")
-
-        do {
-            let pipe = try await buildPipeline(modelName: modelName, repo: repo)
-            DebugLog.log("Transcriber: WhisperKit() returned successfully")
-            self.pipeline = pipe
-
-            self.state = .ready
-            settings.lastSuccessfulLoadAt = Date().timeIntervalSince1970
-            settings.lastSuccessfulModelId = modelName
-            DebugLog.log("Transcriber: state=ready, model=\(modelName)")
-        } catch {
-            DebugLog.log("Transcriber: WhisperKit init FAILED — \(error.localizedDescription)")
-            self.state = .error(error.localizedDescription)
-        }
-        loadingTask = nil
-    }
-
-    /// Build the WhisperKit pipeline. Preferred path: explicit `WhisperKit.download`
-    /// (idempotent, cached after first run) so we can surface real download progress,
-    /// then load from the local folder. If that throws (e.g. offline with the model
-    /// already cached — `download` still hits the network for the file list), fall back
-    /// to letting WhisperKit resolve download/local itself (original behavior, no
-    /// progress). Guarantees we're never worse than before the progress feature.
-    private func buildPipeline(modelName: String, repo: String) async throws -> WhisperKit {
-        do {
-            DebugLog.log("Transcriber: ensuring model downloaded…")
-            let folder = try await WhisperKit.download(
-                variant: modelName,
-                from: repo,
-                progressCallback: { [weak self] progress in
-                    let f = progress.fractionCompleted
-                    guard f < 1.0 else { return }
-                    Task { @MainActor in
-                        guard let self else { return }
-                        if case .ready = self.state { return }
-                        self.state = .downloading(progress: f)
-                    }
+        func voiceActivity(in waveform: [Float]) -> [Bool] {
+            let count = Int((Double(waveform.count) / Double(frameLengthSamples)).rounded(.up))
+            return (0..<count).map { i in
+                let start = i * frameLengthSamples
+                let end = min(start + frameLengthSamples, waveform.count)
+                var rms: Float = 0
+                waveform.withUnsafeBufferPointer { buf in
+                    vDSP_rmsqv(buf.baseAddress! + start, 1, &rms, vDSP_Length(end - start))
                 }
-            )
-            state = .loading
-            DebugLog.log("Transcriber: building WhisperKitConfig (modelFolder=\(folder.lastPathComponent))")
-            let config = WhisperKitConfig(
-                model: modelName,
-                modelFolder: folder.path,
-                verbose: false,
-                logLevel: .error,
-                prewarm: false,  // skip the warm-up inference pass; saves ~3-5s on cold load
-                load: true,
-                download: false
-            )
-            DebugLog.log("Transcriber: calling WhisperKit(config)…")
-            return try await WhisperKit(config)
-        } catch {
-            DebugLog.log("Transcriber: download-with-progress failed (\(error.localizedDescription)); falling back to config-managed load")
-            state = .loading
-            let config = WhisperKitConfig(
-                model: modelName,
-                modelRepo: repo,
-                verbose: false,
-                logLevel: .error,
-                prewarm: false,
-                load: true,
-                download: true
-            )
-            return try await WhisperKit(config)
-        }
-    }
-
-    func reloadIfModelChanged() {
-        pipeline = nil
-        state = .notLoaded
-        loadingTask?.cancel()
-        loadingTask = nil
-        ensureLoaded()
-    }
-
-    /// Transcribe an array of mono 16 kHz float32 samples in [-1, 1].
-    func transcribe(audio: [Float]) async -> String {
-        ensureLoaded()
-        // Wait until ready (or error / cancellation — Esc can abort a dictation
-        // stuck waiting on a model download). Keep this off main work.
-        while true {
-            if Task.isCancelled { return "" }
-            switch state {
-            case .ready: break
-            case .error(let msg):
-                NSLog("VoiceVoice transcriber error: \(msg)")
-                return ""
-            default:
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                continue
+                return rms > energyThreshold
             }
-            break
         }
 
-        guard let pipe = pipeline else {
-            DebugLog.log("Transcribe: pipeline is nil")
-            return ""
-        }
-        guard audio.count >= Int(AudioRecorder.targetSampleRate * 0.25) else {
-            DebugLog.log("Transcribe: audio too short (\(audio.count) samples, < 0.25s)")
-            return ""
-        }
+        func voiceActivityIndexToAudioSampleIndex(_ index: Int) -> Int { index * frameLengthSamples }
 
-        let start = Date()
-        // Пустые куски спасает per-chunk rescue-ретрай внутри `decodeOneChunk`.
-        let cleaned = await runDecode(audio: audio, pipe: pipe)
-        lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
-        DebugLog.log("Transcribe: done in \(lastProcessingMs)ms, len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
-        return cleaned
-    }
-
-    // MARK: - Eager streaming
-
-    /// Begin transcribing completed VAD chunks WHILE the user is still recording.
-    /// `samples` is a thread-safe snapshot provider (the recorder's current buffer).
-    /// Each time ≥ one full chunk's worth of new audio has accrued past the last
-    /// committed offset, we cut it on silence and decode it in the background. On
-    /// key-release `finishStreaming` only has to decode the short trailing tail, so
-    /// the perceived latency for long dictations drops to near-zero.
-    ///
-    /// Output parity with batch: the chunk boundaries use the SAME silence-cut logic
-    /// as `chunkBySilence`, so the joined transcript matches what batch mode would produce.
-    func startStreaming(samples: @escaping () -> [Float]) {
-        cancelStreaming()
-        ensureLoaded()
-        streamPieces = []
-        streamCommittedOffset = 0
-        streamDecodeMs = 0
-        streamingActive = true
-        livePreviewText = ""
-        let generation = streamGeneration
-        DebugLog.log("Stream: started")
-        streamTask = Task { [weak self] in
-            await self?.streamLoop(samples: samples, generation: generation)
-        }
-    }
-
-    private func streamLoop(samples: @escaping () -> [Float], generation: Int) async {
-        let vad = EnergyVAD()
-        while streamingActive && !Task.isCancelled && generation == streamGeneration {
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            if !streamingActive || Task.isCancelled { break }
-            guard case .ready = state, let pipe = pipeline else { continue }
-
-            let snap = samples()
-            let fresh = snap.count - streamCommittedOffset
-            // Only commit a chunk once a FULL chunk's worth of fresh audio exists, so
-            // the trailing edge always has room to be cut on silence rather than mid-word.
-            guard fresh >= Self.maxChunkSamples else {
-                // Полного чанка ещё нет — обновляем живой черновик передекодированием
-                // хвоста (turbo на ANE ≈ 0.1×RT, хвост ≤12 с — доли секунды). rawDecode
-                // БЕЗ rescue-ретрая: на тишине вернёт пусто, черновик просто не обновится.
-                if fresh >= Int(AudioRecorder.targetSampleRate * 0.8) {
-                    let tail = Array(snap[streamCommittedOffset..<snap.count])
-                    let text = await rawDecode(tail, pipe: pipe, opts: makeOpts(looseThresholds: false))
-                    guard generation == streamGeneration else { break }
-                    if !text.isEmpty {
-                        livePreviewText = stripHallucinationsUsingSettings(
-                            (streamPieces.map(\.text) + [text]).joined(separator: " ")
-                        )
-                    }
-                }
-                continue
+        /// Самый длинный непрерывный участок тишины (false) в разметке.
+        func findLongestSilence(in vad: [Bool]) -> (startIndex: Int, endIndex: Int)? {
+            var best: (startIndex: Int, endIndex: Int)?
+            var i = 0
+            while i < vad.count {
+                if vad[i] { i += 1; continue }
+                var j = i
+                while j < vad.count, !vad[j] { j += 1 }
+                if j - i > (best.map { $0.endIndex - $0.startIndex } ?? 0) { best = (i, j) }
+                i = j
             }
-
-            let (cut, realPause) = Self.findSilenceCut(in: snap, from: streamCommittedOffset, upTo: snap.count, vad: vad)
-            guard cut > streamCommittedOffset else { continue }
-
-            let chunk = Array(snap[streamCommittedOffset..<cut])
-            let t0 = Date()
-            // decodeOneChunk includes the empty-rescue retry → eager chunks no longer
-            // silently lose ~12 с of speech when Whisper returns empty.
-            let text = await decodeOneChunk(chunk, pipe: pipe)
-            // Отпускание клавиши посреди декода: finishStreaming отменяет задачу,
-            // WhisperKit бросает CancellationError, текст приходит ПУСТЫМ. Коммитить
-            // смещение нельзя — иначе хвост в finishStreaming пропустит этот кусок и
-            // начало диктовки потеряется (реальный кейс: из 13 с осталось 2.6 с).
-            // Прерванный кусок уходит в хвост и передекодируется там.
-            if text.isEmpty && Task.isCancelled {
-                DebugLog.log("Stream: in-flight chunk decode was cancelled — leaving audio for the tail")
-                break
-            }
-            // The session may have been cancelled (Esc) — and even restarted — while
-            // the decode was in flight; `cut` is in the OLD buffer's coordinates.
-            guard generation == streamGeneration else {
-                DebugLog.log("Stream: dropping in-flight chunk of a cancelled session")
-                break
-            }
-            streamDecodeMs += Int(Date().timeIntervalSince(t0) * 1000)
-            if !text.isEmpty { streamPieces.append((text, realPause)) }
-            streamCommittedOffset = cut
-            livePreviewText = streamPieces.map(\.text).joined(separator: " ")
-            DebugLog.log("Stream: committed chunk up to \(cut) (\(text.count) chars, realPause=\(realPause)), pieces=\(streamPieces.count)")
+            return best
         }
-    }
-
-    /// Finish an eager-streaming session: stop the loop, wait for any in-flight
-    /// chunk, decode the remaining tail (everything after the last committed
-    /// offset), and return the full joined transcript. Falls back to a plain
-    /// `transcribe(audio:)` if streaming was never actually started.
-    func finishStreaming(finalSamples: [Float]) async -> String {
-        guard streamTask != nil else {
-            // Streaming wasn't running (model wasn't ready, or eager disabled) —
-            // just do a normal full transcription.
-            return await transcribe(audio: finalSamples)
-        }
-        let start = Date()
-        streamingActive = false
-        streamTask?.cancel()
-        _ = await streamTask?.value   // wait for the in-flight chunk to commit
-        streamTask = nil
-
-        // Model never became ready during the session (lazy load still downloading /
-        // compiling): nothing was committed and the tail can't be decoded here. Fall
-        // back to the plain path, which WAITS for the model — otherwise the whole
-        // dictation would be silently lost.
-        guard pipeline != nil else {
-            DebugLog.log("Stream: model not ready at finish — falling back to full transcribe")
-            streamPieces = []
-            streamCommittedOffset = 0
-            streamDecodeMs = 0
-            return await transcribe(audio: finalSamples)
-        }
-
-        var items = streamPieces
-        let totalDecodeMs = streamDecodeMs
-        let tailStart = min(streamCommittedOffset, finalSamples.count)
-        let tail = tailStart < finalSamples.count ? Array(finalSamples[tailStart...]) : []
-        DebugLog.log("Stream: finishing — committed=\(tailStart), tail=\(tail.count) samples, pieces=\(items.count)")
-        var tailMs = 0
-        // Tail может быть длиннее одного куска → чанкуем его так же (с флагами пауз +
-        // empty-rescue на каждый кусок), чтобы и внутри хвоста была умная склейка.
-        if tail.count >= Int(AudioRecorder.targetSampleRate * 0.25), let pipe = pipeline {
-            let t0 = Date()
-            for ch in Self.chunkBySilence(tail) {
-                if Task.isCancelled { break }
-                let t = await decodeOneChunk(ch.samples, pipe: pipe)
-                if !t.isEmpty { items.append((t, ch.realPauseAfter)) }
-            }
-            tailMs = Int(Date().timeIntervalSince(t0) * 1000)
-        }
-
-        streamPieces = []
-        streamCommittedOffset = 0
-        streamDecodeMs = 0
-        streamingActive = false
-
-        let cleaned = Self.cleanup(stripHallucinationsUsingSettings(Self.joinChunkTexts(items)))
-        // Total compute across eager chunks + tail, so the Dashboard RTF stays honest
-        // (wall-time would understate it since eager work overlapped recording).
-        lastProcessingMs = totalDecodeMs + tailMs
-        DebugLog.log("Stream: done — wall=\(Int(Date().timeIntervalSince(start) * 1000))ms compute=\(lastProcessingMs)ms, len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
-        return cleaned
-    }
-
-    /// Tear down any active streaming session without producing output (e.g. a new
-    /// recording started before the previous finished).
-    func cancelStreaming() {
-        streamGeneration += 1   // invalidate any in-flight chunk commit
-        streamingActive = false
-        streamTask?.cancel()
-        streamTask = nil
-        streamPieces = []
-        streamCommittedOffset = 0
-        livePreviewText = ""
-    }
-
-    /// Clear the live-preview draft (dictation finished or aborted).
-    func clearLivePreview() { livePreviewText = "" }
-
-    /// One decode pass over the whole audio. Pre-chunks (see `chunkBySilence`), decodes
-    /// each chunk with empty-rescue retry, then smart-joins (false sentence breaks at
-    /// forced cuts removed). Returns the cleaned, joined transcript.
-    private func runDecode(audio: [Float], pipe: WhisperKit) async -> String {
-        let chunks = Self.chunkBySilence(audio)
-        DebugLog.log("Transcribe: decode pass samples=\(audio.count), chunks=\(chunks.count)")
-        var items: [(text: String, realPauseAfter: Bool)] = []
-        for (i, ch) in chunks.enumerated() {
-            if Task.isCancelled { break }
-            let t = await decodeOneChunk(ch.samples, pipe: pipe)
-            DebugLog.log("Transcribe: chunk \(i + 1)/\(chunks.count) samples=\(ch.samples.count) → \(t.count) chars, realPauseAfter=\(ch.realPauseAfter)")
-            if !t.isEmpty { items.append((t, ch.realPauseAfter)) }
-        }
-        return Self.cleanup(stripHallucinationsUsingSettings(Self.joinChunkTexts(items)))
-    }
-
-    /// Decode a single ≤14 с chunk. Если обычный проход вернул ПУСТО (Whisper иногда
-    /// целиком отбрасывает кусок по no-speech/logProb-порогам), делаем один ретрай
-    /// со снятыми порогами — спасает настоящую речь, которая иначе терялась бы.
-    private func decodeOneChunk(_ chunk: [Float], pipe: WhisperKit) async -> String {
-        var text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(looseThresholds: false))
-        if text.isEmpty {
-            DebugLog.log("Transcribe: chunk empty → rescue retry (thresholds off)")
-            text = await rawDecode(chunk, pipe: pipe, opts: makeOpts(looseThresholds: true))
-        }
-        return text
-    }
-
-    private func rawDecode(_ chunk: [Float], pipe: WhisperKit, opts: DecodingOptions) async -> String {
-        do {
-            let results = try await pipe.transcribe(audioArray: chunk, decodeOptions: opts)
-            return results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            DebugLog.log("Transcribe: rawDecode FAILED — \(error.localizedDescription)")
-            return ""
-        }
-    }
-
-    /// Build decode options. `looseThresholds` — выключить пороги отсева (rescue-ретрай).
-    ///
-    /// `sampleLength: 224` — НЕ задирать выше: WhisperKit передаёт его как `maxTokenContext`
-    /// в MLMultiArray фикс. размера `Constants.maxTokenContext = 224`; выше → out-of-bounds
-    /// → SIGABRT. Пороги (compressionRatio/logProb/firstTokenLogProb/noSpeech) при
-    /// `looseThresholds` снимаем: сложный кусок иначе ложно уходит в fallback и
-    /// возвращает пустоту.
-    private func makeOpts(looseThresholds: Bool) -> DecodingOptions {
-        DecodingOptions(
-            verbose: false,
-            task: .transcribe,
-            // «auto» из настроек — это НЕ код языка: WhisperKit ожидает валидный код
-            // или nil (автоопределение). Строка "auto" ломала префилл языкового токена.
-            language: settings.language == "auto" ? nil : settings.language,
-            temperature: 0,
-            temperatureFallbackCount: 3,
-            sampleLength: 224,
-            usePrefillPrompt: true,
-            usePrefillCache: true,
-            skipSpecialTokens: true,
-            withoutTimestamps: true,
-            suppressBlank: false,
-            compressionRatioThreshold: looseThresholds ? nil : 2.4,
-            logProbThreshold: looseThresholds ? nil : -1.0,
-            firstTokenLogProbThreshold: looseThresholds ? nil : -1.5,
-            noSpeechThreshold: looseThresholds ? nil : 0.95
-        )
     }
 
     // MARK: - Pre-chunking
 
     /// Hard cap per chunk. 12 секунд ≈ 180-200 токенов на плотной русской речи —
     /// безопасный запас от потолка декодера 223 (см. комментарий выше).
-    private static let maxChunkSamples: Int = 12 * Int(AudioRecorder.targetSampleRate)
+    nonisolated private static let maxChunkSamples: Int = 12 * Int(AudioRecorder.targetSampleRate)
     /// Не режем, если аудио помещается в один чанк (плюс небольшой допуск, чтобы
     /// 12.5-секундную запись не дробить на 12 + 0.5).
     private static let chunkCutoffSamples: Int = 13 * Int(AudioRecorder.targetSampleRate)
@@ -830,11 +485,6 @@ final class Transcriber: ObservableObject {
             kept.append(sent)
         }
         return kept.joined()
-    }
-
-    /// Instance wrapper: pulls the user-editable phrase list from settings and strips.
-    private func stripHallucinationsUsingSettings(_ text: String) -> String {
-        Self.stripHallucinations(text, sentenceBlocklist: Self.defaultBlocklist)
     }
 
     nonisolated private static func normalizeForBlocklist(_ s: String) -> String {

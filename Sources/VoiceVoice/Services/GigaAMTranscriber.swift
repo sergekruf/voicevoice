@@ -378,17 +378,18 @@ final class GigaAMTranscriber: ObservableObject {
 
     private final class SentenceEnds: @unchecked Sendable { var samples: [Int] = [] }
 
-    /// Ширина поиска (1 — жадный декод) и прибавка за токен подсказанного термина
-    /// (0 — без подсказок). Окружение перекрывает настройки — для сравнительных замеров.
+    /// Ширина поиска и прибавка за токен подсказанного термина. Точный режим и подсказка
+    /// включены всегда (выключать их незачем — замеры 23.09); окружение перекрывает
+    /// значения только для сравнительных замеров (BEAM=1 — жадный декод, HOTWORDS=0 —
+    /// без подсказок).
     private var searchConfig: (beam: Int, hotwordBonus: Double) {
         let env = ProcessInfo.processInfo.environment
-        let settings = AppSettings.shared
-        let beam = env["VOICEVOICE_GIGAAM_BEAM"].flatMap(Int.init) ?? settings.gigaamBeamSize
-        let bonus = env["VOICEVOICE_GIGAAM_HOTWORDS"].flatMap(Double.init)
-            ?? (settings.gigaamHotwords ? Self.defaultHotwordBonus : 0)
+        let beam = env["VOICEVOICE_GIGAAM_BEAM"].flatMap(Int.init) ?? Self.beamSize
+        let bonus = env["VOICEVOICE_GIGAAM_HOTWORDS"].flatMap(Double.init) ?? Self.hotwordBonus
         return (max(1, beam), max(0, bonus))
     }
-    static let defaultHotwordBonus = 1.5
+    static let beamSize = 4
+    static let hotwordBonus = 1.5
 
     /// Термины для подсказки — правые части словаря правок (то, как слово должно быть
     /// написано), но только несклоняемые на практике: латиница (Claude, API, DBS),

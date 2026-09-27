@@ -21,7 +21,6 @@ final class AppController: ObservableObject {
     @Published var onboardingNeeded: Bool = false
 
     private let recorder = AudioRecorder()
-    private let transcriber = Transcriber.shared
     private let applier = CorrectionApplier.shared
     private let inserter = TextInserter.shared
     private let history = HistoryStore.shared
@@ -29,7 +28,6 @@ final class AppController: ObservableObject {
     private let settings = AppSettings.shared
     private let hotkeys = HotkeyMonitor.shared
 
-    private var transcriberObserver: AnyCancellable?
     private var parakeetObserver: AnyCancellable?
     private var gigaAMObserver: AnyCancellable?
 
@@ -68,12 +66,6 @@ final class AppController: ObservableObject {
                 HUDManager.shared.showLoadingIndicator()
             }
         }
-        transcriberObserver = transcriber.$state
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                guard self?.settings.sttEngine == .whisperKit else { return }
-                apply(state)
-            }
         parakeetObserver = ParakeetTranscriber.shared.$state
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
@@ -115,11 +107,27 @@ final class AppController: ObservableObject {
         startWarmIdleWatch()
         // Возврат системного входа, если его захватила BT-гарнитура (по настройке).
         SystemInputGuard.shared.applySetting()
-        // LLM-модель тяжёлая (загрузка секунды + прогрев): если тумблер включён,
-        // поднимаем сразу, чтобы первая диктовка не ждала.
-        if settings.llmEditor { LLMEditorService.shared.ensureLoaded() }
-        LLMEditorService.shared.startIdleWatch()
         startDictionaryCheckWatch()
+        Self.trashRemovedFeatureModels()
+    }
+
+    /// Модели удалённых функций (LLM «Глубокая чистка», Sage, нейро-пунктуация RUPunct)
+    /// больше не нужны — в Корзину, а не насовсем: ~1,5 ГБ, и пользователь может вернуть.
+    /// Модели WhisperKit лежат в общей папке `~/Documents/huggingface` — её не трогаем.
+    private static func trashRemovedFeatureModels() {
+        DispatchQueue.global(qos: .utility).async {
+            let base = AppPaths.appSupportDir
+            for rel in ["models/LLM", "models/Sage", "RUPunct_small.mlmodelc"] {
+                let url = base.appendingPathComponent(rel)
+                guard FileManager.default.fileExists(atPath: url.path) else { continue }
+                do {
+                    try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                    DebugLog.log("App: модель удалённой функции перенесена в Корзину — \(rel)")
+                } catch {
+                    DebugLog.log("App: не удалось перенести в Корзину \(rel) — \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     // MARK: - Автопроверка словаря
@@ -156,14 +164,12 @@ final class AppController: ObservableObject {
 
     /// Прогон проверки (используется расписанием и кнопкой «Проверить сейчас»).
     @discardableResult
-    func runDictionaryCheck() -> (audit: Int, candidates: Int) {
+    func runDictionaryCheck() -> Int {
         settings.lastDictionaryCheckAt = Date().timeIntervalSince1970
-        let entries = corrections.allOrdered()
-        let audit = DictionaryAudit.audit(entries)
-        let candidates = HistoryMining.candidates(from: history.recent(limit: 500), existing: entries)
-        DebugLog.log("DictCheck: замечаний \(audit.count), кандидатов \(candidates.count)")
-        HUDManager.shared.showDictionaryCheck(auditCount: audit.count, candidateCount: candidates.count)
-        return (audit.count, candidates.count)
+        let audit = DictionaryAudit.audit(corrections.allOrdered())
+        DebugLog.log("DictCheck: замечаний \(audit.count)")
+        HUDManager.shared.showDictionaryCheck(auditCount: audit.count)
+        return audit.count
     }
 
     /// One-time backfill: lifetime counters were added after the app already had a
@@ -203,15 +209,11 @@ final class AppController: ObservableObject {
     /// Acts as a no-op if the model is already loaded or loading.
     func warmUpIfNeeded() {
         ensureActiveEngineLoaded()
-        if settings.punctuationModel { RUPunctService.shared.ensureLoaded() }
-        if settings.sageCorrector && !settings.llmEditor { SageCorrectorService.shared.ensureLoaded() }
-        if settings.llmEditor { LLMEditorService.shared.ensureLoaded() }
     }
 
-    /// Load whichever engine is currently selected (WhisperKit or Parakeet).
+    /// Load whichever engine is currently selected (GigaAM or Parakeet).
     private func ensureActiveEngineLoaded() {
         switch settings.sttEngine {
-        case .whisperKit: transcriber.ensureLoaded()
         case .parakeet: ParakeetTranscriber.shared.ensureLoaded()
         case .gigaAM: GigaAMTranscriber.shared.ensureLoaded()
         }
@@ -277,8 +279,6 @@ final class AppController: ObservableObject {
         // Lazy load: ensure the model starts loading in the background while we record.
         // If the user holds Fn for several seconds, the model is usually ready by release.
         ensureActiveEngineLoaded()
-        // LLM могла быть выгружена по простою — поднимаем, пока идёт запись (~1 с).
-        if settings.llmEditor { LLMEditorService.shared.ensureLoaded() }
         // Мьют — ДО старта движка: смена состояния BT-вывода дёргает у запущенного
         // AVAudioEngine конфигурацию (наблюдалось: мьют → configuration change через
         // 1–5 мс) и вызывает лишний перезапуск захвата с потерей начала фразы.
@@ -290,19 +290,8 @@ final class AppController: ObservableObject {
             state = .recording(level: 0)
             HUDManager.shared.showRecording()
             installEscMonitor()
-            // Eager streaming: decode completed VAD chunks in the background while the
-            // user keeps speaking, so on release only the trailing tail remains.
-            // WhisperKit-only — Parakeet is fast enough and has no 223-token cap, so
-            // it just transcribes the whole buffer on release.
-            // Eager-стриминг для WhisperKit всегда включён: результат идентичен
-            // batch-режиму (те же резы по тишине), финал приходит быстрее, и от него
-            // же питается живой черновик. Отдельный тоггл убран как невостребованный.
-            if settings.sttEngine == .whisperKit {
-                transcriber.startStreaming(samples: { [weak self] in
-                    self?.recorder.currentSamples() ?? []
-                })
-            }
-            // Parakeet и GigaAM получают собственный лёгкий превью-цикл (быстрые движки).
+            // Живой черновик в HUD — лёгкий превью-цикл движка (распознаёт весь
+            // буфер на отпускании, превью — только для показа).
             // Живой черновик включён всегда (тоггл убран как лишний).
             if settings.sttEngine == .parakeet {
                 ParakeetTranscriber.shared.startPreview(samples: { [weak self] in
@@ -365,7 +354,6 @@ final class AppController: ObservableObject {
             DebugLog.log("App: dictation cancelled via Esc")
             SystemAudioMuter.shared.restore()
             recorder.cancel()
-            transcriber.cancelStreaming()
         case .transcribing:
             DebugLog.log("App: transcription cancelled via Esc")
             transcribeTask?.cancel()
@@ -379,7 +367,6 @@ final class AppController: ObservableObject {
         hotkeys.resetPressState()   // keep the Caps Lock toggle in sync
         Task { await ParakeetTranscriber.shared.stopPreview() }
         Task { await GigaAMTranscriber.shared.stopPreview() }
-        transcriber.clearLivePreview()
         ParakeetTranscriber.shared.clearLivePreview()
         GigaAMTranscriber.shared.clearLivePreview()
     }
@@ -412,43 +399,18 @@ final class AppController: ObservableObject {
 
         transcribeTask = Task { [weak self] in
             guard let self else { return }
-            // Route to the active engine. WhisperKit: finishStreaming finishes an
-            // in-flight eager session (decodes only the trailing tail + joins committed
-            // chunks), or falls back to a full transcription if streaming never started.
-            // Parakeet: one shot on the whole buffer (no eager, no 223-token cap).
-            var rawText: String
+            // Активный движок распознаёт весь буфер целиком (длинную запись режет сам).
+            let rawText: String
             switch self.settings.sttEngine {
             case .parakeet:
                 rawText = await ParakeetTranscriber.shared.transcribe(audio: samples)
-            case .whisperKit:
-                rawText = await self.transcriber.finishStreaming(finalSamples: samples)
             case .gigaAM:
                 rawText = await GigaAMTranscriber.shared.transcribe(audio: samples)
             }
             // Сырой выход движка запоминаем до всей пост-обработки: по нему потом
-            // видно, что исправили модели, и из повторяющихся правок рождаются
-            // кандидаты в словарь (HistoryMining).
+            // видно, что изменила пост-обработка, и на нём сравниваются настройки
+            // распознавания.
             let engineText = rawText
-            // Neural punctuation/casing restoration (opt-in) — on the raw STT text,
-            // before the rest of the pipeline; replaces the regex PunctuationFixer.
-            // GigaAM e2e расставляет знаки сам — RUPunct поверх только навредит.
-            if self.settings.punctuationModel && self.settings.sttEngine != .gigaAM {
-                rawText = await RUPunctService.shared.punctuate(rawText)
-            }
-            // Нейро-исправление ошибок (opt-in) — после восстановления пунктуации,
-            // до словаря правок в finalize (правки пользователя приоритетнее модели).
-            // Sage пропускается при включённой LLM: он идёт первым, а его перевирания
-            // («референс» → «референдум») LLM откатить не может — пословный гард
-            // разрешает менять слово не больше чем на две буквы.
-            if self.settings.sageCorrector && !self.settings.llmEditor {
-                rawText = await SageCorrectorService.shared.correct(rawText)
-            }
-            // Глубокая чистка LLM (opt-in) — последний нейро-шаг, видит контекст
-            // всего абзаца; после Sage, до словаря правок (правки пользователя
-            // приоритетнее модели).
-            if self.settings.llmEditor {
-                rawText = await LLMEditorService.shared.correct(rawText)
-            }
             // Esc during transcription cancels this task — drop the result instead
             // of pasting into whatever field happens to be focused by now.
             if Task.isCancelled {
@@ -460,7 +422,7 @@ final class AppController: ObservableObject {
                 self.transcribeTask = nil
                 let procMs = self.settings.sttEngine == .parakeet
                     ? ParakeetTranscriber.shared.lastProcessingMs
-                    : self.transcriber.lastProcessingMs
+                    : GigaAMTranscriber.shared.lastProcessingMs
                 DebugLog.log("App: transcribe finished, rawLen=\(rawText.count) text=\(rawText.prefix(80))")
                 self.finalize(rawText: rawText, engineText: engineText,
                               duration: duration, processingMs: procMs)
@@ -473,12 +435,7 @@ final class AppController: ObservableObject {
         let applyResult = applier.apply(to: rawText)
         let dictText = applyResult.text
         var appliedText = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
-        // Regex punctuation fixer — skipped when the neural model already restored
-        // punctuation upstream, and for GigaAM (у e2e-модели знаки уже правильные).
-        if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
-            appliedText = PunctuationFixer.fix(appliedText)
-        }
-        // Не зависят ни от движка, ни от LLM, ни от тумблера выше: рубленые фразы перед
+        // Не зависят от движка: рубленые фразы перед
         // «а / но / хотя / потому что…» склеиваются запятой, потерянный «?» ставится
         // там, где вопрос однозначен по грамматике.
         let merged = PunctuationFixer.mergeContinuationClauses(appliedText)
@@ -528,7 +485,6 @@ final class AppController: ObservableObject {
         lastPasteOutcome = .pending
         state = .complete
         HUDManager.shared.hideRecording()
-        transcriber.clearLivePreview()
         ParakeetTranscriber.shared.clearLivePreview()
         GigaAMTranscriber.shared.clearLivePreview()
 
@@ -576,37 +532,21 @@ final class AppController: ObservableObject {
     /// auto-learn. Used by the "Транскрибировать файл…" feature. Long files are chunked
     /// by the engine's own `transcribe(audio:)`.
     func transcribeAudioSamples(_ samples: [Float]) async -> String {
-        var raw: String
+        let raw: String
         switch settings.sttEngine {
         case .parakeet: raw = await ParakeetTranscriber.shared.transcribe(audio: samples)
-        case .whisperKit: raw = await transcriber.transcribe(audio: samples)
         case .gigaAM: raw = await GigaAMTranscriber.shared.transcribe(audio: samples)
-        }
-        if settings.punctuationModel && settings.sttEngine != .gigaAM {
-            raw = await RUPunctService.shared.punctuate(raw)
-        }
-        if settings.sageCorrector && !settings.llmEditor {
-            raw = await SageCorrectorService.shared.correct(raw)
-        }
-        if settings.llmEditor {
-            raw = await LLMEditorService.shared.correct(raw)
         }
         return applyTextPipeline(raw)
     }
 
     /// Post-recognition text pipeline shared with live dictation (dictionary → numbers →
-    /// punctuation → format → emoji), minus the stats/paste side-effects of `finalize`.
+    /// punctuation), minus the stats/paste side-effects of `finalize`.
     private func applyTextPipeline(_ rawText: String) -> String {
         guard !rawText.isEmpty else { return rawText }
         let dictText = applier.apply(to: rawText).text
-        var t = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
-        // Skip the regex fixer when the neural model already restored punctuation
-        // (или движок e2e расставил знаки сам).
-        if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
-            t = PunctuationFixer.fix(t)
-        }
-        t = PunctuationFixer.restoreQuestionMarks(PunctuationFixer.mergeContinuationClauses(t))
-        return t
+        let t = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
+        return PunctuationFixer.restoreQuestionMarks(PunctuationFixer.mergeContinuationClauses(t))
     }
 
     // MARK: - Edit & Learn

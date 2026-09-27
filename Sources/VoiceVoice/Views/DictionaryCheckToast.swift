@@ -1,16 +1,14 @@
 import SwiftUI
 
-/// Итог автопроверки словаря: сколько правил стоит убрать и сколько исправлений
-/// просятся в словарь. Сам ничего не меняет — только зовёт открыть словарь.
+/// Итог автопроверки словаря: сколько правил стоит убрать. Сам ничего не меняет —
+/// только зовёт открыть словарь.
 struct DictionaryCheckToast: View {
     let auditCount: Int
-    let candidateCount: Int
     var onOpen: (() -> Void)? = nil
 
     private var lines: [String] {
         var out: [String] = []
         if auditCount > 0 { out.append("\(auditCount) правил стоит проверить и убрать") }
-        if candidateCount > 0 { out.append("\(candidateCount) повторяющихся исправлений можно добавить") }
         return out
     }
 

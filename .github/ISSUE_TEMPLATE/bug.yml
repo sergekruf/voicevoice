@@ -71,13 +71,10 @@ body:
   - type: dropdown
     id: model
     attributes:
-      label: Модель Whisper
+      label: Движок распознавания
       options:
-        - large-v3-turbo, 4-bit (default)
-        - large-v3-turbo (full)
-        - large-v3
-        - medium
-        - small
+        - GigaAM v3 (русский)
+        - Parakeet TDT v3
     validations:
       required: true
 

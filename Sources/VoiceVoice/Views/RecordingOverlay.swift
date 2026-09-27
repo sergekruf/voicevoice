@@ -6,7 +6,6 @@ import SwiftUI
 struct RecordingOverlay: View {
     @ObservedObject private var controller = AppController.shared
     @ObservedObject private var settings = AppSettings.shared
-    @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
 
@@ -43,7 +42,6 @@ struct RecordingOverlay: View {
     /// Draft from whichever engine is active.
     private var previewText: String {
         switch settings.sttEngine {
-        case .whisperKit: return transcriber.livePreviewText
         case .parakeet: return parakeet.livePreviewText
         case .gigaAM: return gigaam.livePreviewText
         }

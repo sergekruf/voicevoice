@@ -4,7 +4,7 @@
 
 ## Issues
 
-- **Bug report** — пожалуйста, заполните шаблон `.github/ISSUE_TEMPLATE/bug.yml`. Минимум: версия macOS, чип (M1/M2/…), модель Whisper, поведение vs ожидание, лог из `~/Library/Logs/VoiceVoice/voicevoice.log` за последнюю минуту.
+- **Bug report** — пожалуйста, заполните шаблон `.github/ISSUE_TEMPLATE/bug.yml`. Минимум: версия macOS, чип (M1/M2/…), движок распознавания (GigaAM или Parakeet), поведение vs ожидание, лог из `~/Library/Logs/VoiceVoice/voicevoice.log` за последнюю минуту.
 - **Feature request** — заполните шаблон `.github/ISSUE_TEMPLATE/feature.yml`. Опишите use-case, который сейчас неудобен.
 
 ## Pull requests

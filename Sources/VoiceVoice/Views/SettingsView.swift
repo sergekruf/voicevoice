@@ -30,22 +30,23 @@ struct HelpHint: View {
                 }
             }
             .popover(isPresented: $showTooltip, arrowEdge: .top) {
+                // Ширина — точная, не maxWidth: с одним ограничением сверху поповер на
+                // macOS 26 (SDK Xcode 27) считал высоту неверно и открывался пустой панелью
+                // во весь экран. При фиксированной ширине высота однозначно следует из текста.
                 Text(text)
                     .font(.callout)
-                    .padding(10)
-                    .frame(maxWidth: 340)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 320, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
             }
     }
 }
 
 struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
-    @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
-    @ObservedObject private var sage = SageCorrectorService.shared
-    @ObservedObject private var llm = LLMEditorService.shared
     @State private var inputDevices: [AudioInputDevice] = []
     @State private var defaultInputName: String = ""
     @State private var lastCheckEmpty = false
@@ -53,7 +54,6 @@ struct SettingsView: View {
     /// State of whichever engine is currently selected.
     private var activeState: Transcriber.ModelState {
         switch settings.sttEngine {
-        case .whisperKit: return transcriber.state
         case .parakeet: return parakeet.state
         case .gigaAM: return gigaam.state
         }
@@ -71,25 +71,10 @@ struct SettingsView: View {
                 } label: {
                     Text("Движок")
                 }
-                Text("**GigaAM** — лучшее качество на русском, знаки препинания и числа из коробки (только русский). **Parakeet** — самый быстрый, 25 языков, хорош для коротких заметок. **WhisperKit** — 99 языков, выбор моделей; берите, если диктуете не только по-русски. Модель выбранного движка (~400–600 МБ) скачивается при первом выборе.")
+                Text("**GigaAM** — лучшее качество на русском, знаки препинания и числа из коробки (только русский). **Parakeet** — самый быстрый, 25 европейских языков; берите, если диктуете не только по-русски. Модель выбранного движка (~400–600 МБ) скачивается при первом выборе.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if settings.sttEngine == .whisperKit {
-                    Picker(selection: $settings.modelName) {
-                        ForEach(WhisperModelChoice.allCases) { m in
-                            Text(m.displayName).tag(m.rawValue)
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("Модель Whisper")
-                            HelpHint(text: "Какую модель Whisper использовать для распознавания. Крупные модели точнее, но потребляют больше RAM и дольше работают. Квантованные (4-bit) — компромисс: занимают меньше памяти при незначительной потере качества. Новая модель скачивается и перезагружается автоматически при выборе; первая компиляция для Neural Engine может занять несколько минут.")
-                        }
-                    }
-                    .onChange(of: settings.modelName) { _, _ in
-                        transcriber.reloadIfModelChanged()
-                    }
-                }
                 HStack {
                     Text("Статус:")
                     Text(modelStatus).foregroundStyle(.secondary)
@@ -103,10 +88,9 @@ struct SettingsView: View {
                         switch settings.sttEngine {
                         case .parakeet: parakeet.reload()
                         case .gigaAM: gigaam.reload()
-                        case .whisperKit: transcriber.reloadIfModelChanged()
                         }
                     }
-                    HelpHint(text: "Перезагрузить модель в память. Используйте, если столкнулись с подозрительным поведением распознавания (смена модели в списке выше перезагружает её автоматически).")
+                    HelpHint(text: "Перезагрузить модель в память. Используйте, если столкнулись с подозрительным поведением распознавания (смена движка выше перезагружает модель автоматически).")
                 }
             }
             Section("Микрофон") {
@@ -178,115 +162,12 @@ struct SettingsView: View {
                 }
             }
             Section("Распознавание") {
-                if settings.sttEngine == .whisperKit {
-                    Picker(selection: $settings.language) {
-                        Text("Русский").tag("ru")
-                        Text("English").tag("en")
-                        Text("Auto").tag("auto")
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("Язык")
-                            HelpHint(text: "Язык, который ожидает услышать модель Whisper. Auto — определяет сама (может ошибаться на коротких фразах). Если вы всегда говорите на одном языке — лучше выбрать его явно, точность будет выше. Parakeet определяет язык всегда автоматически, поэтому для него эта настройка скрыта.")
-                        }
-                    }
-                }
-
                 Toggle(isOn: $settings.normalizeNumbers) {
                     HStack(spacing: 4) {
                         Text("Нормализовать числа")
                         HelpHint(text: "Числительные словами превращаются в цифры: «две тысячи пятьсот тридцать два» → 2532 (особенно важно для Parakeet — он пишет числа словами). Составные числа склеиваются только в правильном порядке разрядов, поэтому «один два три» останется отдельными числами, а «тысячи людей» не тронется. Дополнительно: пробелы между разрядами убираются (\"1 425 689\" → \"1425689\"), лишняя точка после числа в конце фразы удаляется (\"6532.\" → \"6532\") — удобно для вставки в таблицы. Десятичные дроби типа \"12.5\" не трогаются, одиночное «один/одна/одно» остаётся словом.")
                     }
                 }
-
-                Toggle(isOn: $settings.punctuationModel) {
-                    HStack(spacing: 4) {
-                        Text("Нейро-пунктуация (модель)")
-                        HelpHint(text: "Экспериментально. Расставляет знаки препинания и заглавные буквы нейросетевой моделью (RUPunct, ~56 МБ, целиком на устройстве) вместо набора правил. Особенно полезно для движка Parakeet, который на длинных записях не ставит знаки. Модель загружается в память при первом использовании. Когда включено — заменяет «Исправлять знаки в конце предложений». Работает только для русского.")
-                    }
-                }
-                Toggle(isOn: $settings.sageCorrector) {
-                    HStack(spacing: 4) {
-                        Text("Нейро-исправление ошибок (модель)")
-                        HelpHint(text: "Экспериментально. Исправляет ошибки распознавания — опечатки, ослышки, пропущенные запятые и заглавные — нейросетью sage (SberDevices, 95 млн параметров, ~230 МБ, целиком на устройстве). Модель скачивается один раз при включении. Работает после нейро-пунктуации и до словаря правок, поэтому ваши правки из словаря имеют приоритет. Модель осторожная: если правка меняет текст слишком сильно (похоже на галлюцинацию), она отбрасывается и остаётся исходный текст. Добавляет ~0,1–0,5 с к обработке. Работает только для русского.")
-                    }
-                }
-                .disabled(settings.llmEditor)
-                .onChange(of: settings.sageCorrector) { _, enabled in
-                    if enabled && !settings.llmEditor { SageCorrectorService.shared.ensureLoaded() }
-                }
-                if settings.llmEditor {
-                    Text("Неактивно: включена «Глубокая чистка (LLM)» — она делает то же самое с пониманием контекста, а ошибки Sage («референс» → «референдум») LLM исправить уже не может.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 20)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if settings.sageCorrector, sage.state != .ready {
-                    Text("Модель исправления: \(sageStatus)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 20)
-                }
-                Toggle(isOn: $settings.llmEditor) {
-                    HStack(spacing: 4) {
-                        Text("Глубокая чистка (LLM, модель ~1 ГБ)")
-                        HelpHint(text: "Экспериментально. Языковая модель Qwen3-1.7B (целиком на устройстве, через Metal) перечитывает распознанный текст с пониманием смысла и чинит то, что не видят движок и «Нейро-исправление»: омофоны («колонку и того» → «итого»), ослышки («вотов» → «ботов»), пропущенные точки перед новым предложением. Модель ~1 ГБ скачивается один раз при включении и занимает ~1,2 ГБ памяти, пока загружена (по простою выгружается — см. ниже); добавляет ~1 с к обработке каждой диктовки. Модель осторожная: меняет слово только на созвучное, стиль и латиницу не трогает, при малейшем сомнении оставляет как есть; подозрительные правки отбрасываются. Работает после «Нейро-исправления» и до словаря правок. Только русский.")
-                    }
-                }
-                .onChange(of: settings.llmEditor) { _, enabled in
-                    if enabled { LLMEditorService.shared.ensureLoaded() } else { LLMEditorService.shared.unload() }
-                }
-                if settings.llmEditor, llm.state != .ready {
-                    Text("Модель LLM: \(llmStatus)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 20)
-                }
-                if settings.llmEditor {
-                    Picker(selection: $settings.llmIdleUnloadMinutes) {
-                        Text("через 5 минут").tag(5)
-                        Text("через 10 минут").tag(10)
-                        Text("через 30 минут").tag(30)
-                        Text("никогда").tag(0)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("Выгружать LLM из памяти при простое")
-                            HelpHint(text: "Модель нужна только в момент диктовки. Если диктовок не было указанное время, она выгружается и приложение занимает ~30 МБ; при следующем нажатии клавиши диктовки загружается заново прямо во время записи (~1 с) — обычно к отпусканию клавиши уже готова. «Никогда» — держать в памяти постоянно (~1,2 ГБ).")
-                        }
-                    }
-                    .padding(.leading, 20)
-                }
-
-                if settings.sttEngine == .gigaAM {
-                    Toggle(isOn: Binding(get: { settings.gigaamBeamSize > 1 },
-                                         set: { settings.gigaamBeamSize = $0 ? 4 : 1 })) {
-                        HStack(spacing: 4) {
-                            Text("Точный режим распознавания")
-                            HelpHint(text: "Движок держит четыре версии фразы и выбирает лучшую целиком, а не берёт на каждом шаге первый попавшийся вариант. На проверке: меньше ошибок в словах («баннера» вместо «Боннира», «чертежом» вместо «чертёжным»), чаще верный знак в конце. Цена — около 0,1 с на короткую фразу и 0,3 с на длинную.")
-                        }
-                    }
-                    Toggle(isOn: $settings.gigaamHotwords) {
-                        HStack(spacing: 4) {
-                            Text("Подсказывать движку термины из словаря")
-                            HelpHint(text: "Названия, аббревиатуры и латиница из словаря правок (Claude, API, ФБС, СДЭК, DBS…) подсказываются движку прямо во время распознавания: при похожем звучании он выберет нужное написание, а не «клот» или «пбс». Обычные слова не подсказываются — подсказка тянула бы их в одну форму («на дашборд» вместо «на дашборде»). Работает вместе с точным режимом.")
-                        }
-                    }
-                }
-
-                Toggle(isOn: $settings.keepDictationAudio) {
-                    HStack(spacing: 4) {
-                        Text("Сохранять аудио диктовок для проверки качества")
-                        HelpHint(text: "Записи нужны, чтобы сравнивать настройки распознавания на вашем голосе, а не на синтезированном. Хранятся только на этом Mac (~/Library/Application Support/VoiceVoice/recordings) и никуда не отправляются, старше 14 дней удаляются. Около 2 МБ на минуту речи. Исправленный в истории текст (двойной клик по записи) становится эталоном для проверки.")
-                    }
-                }
-
-                Toggle(isOn: $settings.fixPunctuation) {
-                    HStack(spacing: 4) {
-                        Text("Исправлять знаки в конце предложений")
-                        HelpHint(text: "Движки иногда ошибаются со знаком в конце предложения (вопрос → точка, утверждение → вопрос). Простые русские правила исправляют очевидные случаи:\n\n• Частица «ли» в предложении («Был ли ты вчера») → терминатор становится «?». Устойчивые обороты «вряд ли / едва ли / чуть ли / мало ли / то ли» вопросом не считаются.\n• Предложение начинается с вопросительного слова (что / где / когда / почему / куда / откуда / зачем / кто / сколько / разве / неужели), допустимо после дискурсивных «А / Ну / Так / И» — «.» меняется на «?». Исключения: «что-то / где-нибудь…», «что касается / что ж / что бы», «разве что» — это не вопросы.\n• Длинное предложение (≥ 5 слов) без вопросительных маркеров, оканчивающееся на «?» → меняется на «.» (вероятно, неверно понятая интонация).\n\nЗнак «!» не трогается — восклицание и эмоциональный вопрос неразличимы без аудио. «Как» и «какой» не считаются вопросительными («Как красиво!»). Неактивно при включённой нейро-пунктуации — она заменяет эти правила.")
-                    }
-                }
-                .disabled(settings.punctuationModel)
-
 
                 Toggle(isOn: $settings.fuzzyMatching) {
                     HStack(spacing: 4) {
@@ -305,8 +186,8 @@ struct SettingsView: View {
                 if settings.fuzzyMatching {
                     HStack {
                         Text("Чувствительность fuzzy:")
-                        HelpHint(text: "Максимально допустимая доля отличий (расстояние Левенштейна / длина) для матча. 10% — почти точное; 25% — рекомендуется; 50% — очень агрессивно, могут быть ложные срабатывания.")
-                        Slider(value: $settings.fuzzyThreshold, in: 0.1...0.5)
+                        HelpHint(text: "Сколько букв может отличаться, чтобы правило из словаря всё равно сработало: доля от длины фразы. 15% (рекомендуется) — одна буква в словах до 10 букв и две в более длинных: «клот» поймает и «клод», «Валберис» — «валберес». 25% — уже две буквы в словах от 6 букв, риск лишних замен в названиях. Обычные русские слова нечёткое сравнение не трогает при любом значении, слова короче 4 букв — тоже.")
+                        Slider(value: $settings.fuzzyThreshold, in: 0.05...0.3)
                             .frame(maxWidth: 220)
                         Text(String(format: "%.0f%%", settings.fuzzyThreshold * 100))
                             .monospacedDigit()
@@ -320,13 +201,12 @@ struct SettingsView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Text("Проверять словарь автоматически")
-                        HelpHint(text: "По расписанию приложение само выполняет «Ревизию…» (какие правила стоит убрать: замены обычных слов, дубликаты, отклонённые) и «Разбор диктовок…» (какие исправления повторяются и просятся в словарь), после чего показывает уведомление с числом находок. Ничего не удаляется и не добавляется без вашего подтверждения — открыть список можно кнопкой в уведомлении или в окне «Словарь правок». В тихом режиме уведомление не показывается.")
+                        HelpHint(text: "По расписанию приложение само выполняет «Ревизию…» словаря (какие правила стоит убрать: замены обычных слов, дубликаты, отклонённые) и показывает уведомление с числом находок. Ничего не удаляется без вашего подтверждения — открыть список можно кнопкой в уведомлении или в окне «Словарь правок». В тихом режиме уведомление не показывается.")
                     }
                 }
                 HStack {
                     Button("Проверить сейчас") {
-                        let r = AppController.shared.runDictionaryCheck()
-                        if r.audit == 0 && r.candidates == 0 { lastCheckEmpty = true }
+                        if AppController.shared.runDictionaryCheck() == 0 { lastCheckEmpty = true }
                     }
                     if lastCheckEmpty {
                         Text("замечаний нет").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -421,23 +301,4 @@ struct SettingsView: View {
         }
     }
 
-    private var llmStatus: String {
-        switch llm.state {
-        case .notLoaded: return "не загружена"
-        case .downloading(let p): return "скачивание \(Int(p * 100))% (~1 ГБ)"
-        case .loading: return "инициализация"
-        case .ready: return "готова"
-        case .error(let m): return "ошибка: \(m)"
-        }
-    }
-
-    private var sageStatus: String {
-        switch sage.state {
-        case .notLoaded: return "не загружена"
-        case .downloading(let p): return "скачивание \(Int(p * 100))%"
-        case .loading: return "инициализация"
-        case .ready: return "готова"
-        case .error(let m): return "ошибка: \(m)"
-        }
-    }
 }

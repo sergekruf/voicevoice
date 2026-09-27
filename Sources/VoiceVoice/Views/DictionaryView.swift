@@ -7,7 +7,6 @@ struct DictionaryView: View {
     @State private var search: String = ""
     @State private var showingAdd = false
     @State private var auditFindings: [DictionaryAudit.Finding]? = nil
-    @State private var miningCandidates: [HistoryMining.Candidate]? = nil
 
     var body: some View {
         VStack(spacing: 8) {
@@ -21,11 +20,6 @@ struct DictionaryView: View {
                 } label: {
                     Label("Добавить", systemImage: "plus")
                 }
-                Button("Разбор диктовок…") {
-                    miningCandidates = HistoryMining.candidates(
-                        from: HistoryStore.shared.recent(limit: 500), existing: entries)
-                }
-                .help("Найти в истории исправления, которые повторяются раз за разом, и предложить их в словарь.")
                 Button("Ревизия…") { auditFindings = DictionaryAudit.audit(entries) }
                     .help("Найти правила, которые будут портить будущие диктовки: замены обычных слов, дубликаты, отклонённые вами.")
                 Button("Экспорт JSON") { exportJSON() }
@@ -83,20 +77,6 @@ struct DictionaryView: View {
                 reload()
             } onCancel: {
                 auditFindings = nil
-            }
-        }
-        .sheet(item: Binding(
-            get: { miningCandidates.map { MiningResult(candidates: $0) } },
-            set: { if $0 == nil { miningCandidates = nil } }
-        )) { result in
-            HistoryMiningSheet(candidates: result.candidates) { chosen in
-                for c in chosen {
-                    CorrectionStore.shared.addManual(wrong: c.wrong, right: c.right, contextBefore: nil)
-                }
-                miningCandidates = nil
-                reload()
-            } onCancel: {
-                miningCandidates = nil
             }
         }
         .sheet(isPresented: $showingAdd) {
@@ -298,72 +278,5 @@ private struct DictionaryAuditSheet: View {
                 f.neverUsed || f.issues.contains(where: { $0 != .realWord })
             }.map(\.id))
         }
-    }
-}
-
-
-private struct MiningResult: Identifiable {
-    let candidates: [HistoryMining.Candidate]
-    var id: Int { candidates.count }
-}
-
-/// Кандидаты в словарь из истории: исправления, которые повторились несколько раз.
-/// Как и ревизия, ничего не добавляет без подтверждения.
-private struct HistoryMiningSheet: View {
-    let candidates: [HistoryMining.Candidate]
-    let onAdd: ([HistoryMining.Candidate]) -> Void
-    let onCancel: () -> Void
-
-    @State private var checked: Set<String> = []
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "sparkle.magnifyingglass").foregroundStyle(.tint)
-                Text("Разбор диктовок").font(.headline)
-            }
-            if candidates.isEmpty {
-                Text("Повторяющихся исправлений пока не найдено. Разбор смотрит, что пост-обработка чинила в ваших диктовках не меньше двух раз; записи, сделанные до обновления, в анализ не попадают.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Эти исправления повторялись в ваших диктовках. Добавьте их в словарь — тогда замена будет мгновенной и не будет зависеть от моделей.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(candidates) { c in
-                            Toggle(isOn: Binding(
-                                get: { checked.contains(c.id) },
-                                set: { on in if on { checked.insert(c.id) } else { checked.remove(c.id) } }
-                            )) {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text("«\(c.wrong)» → «\(c.right)»  ·  \(c.count)×")
-                                        .font(.system(.body, design: .monospaced))
-                                    Text(c.example).font(.system(size: 11)).foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                            }
-                        }
-                    }
-                }
-                .frame(minHeight: 200, maxHeight: 360)
-            }
-            HStack {
-                if !candidates.isEmpty {
-                    Button("Отметить все") { checked = Set(candidates.map(\.id)) }
-                    Button("Снять все") { checked.removeAll() }
-                }
-                Spacer()
-                Button("Закрыть", action: onCancel)
-                Button("Добавить в словарь (\(checked.count))") {
-                    onAdd(candidates.filter { checked.contains($0.id) })
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(checked.isEmpty)
-            }
-        }
-        .padding(16)
-        .frame(width: 560)
     }
 }

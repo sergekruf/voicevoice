@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct DashboardView: View {
     @State private var dictStats = CorrectionStore.Stats()
@@ -72,7 +73,7 @@ struct DashboardView: View {
                         StatCard(title: "База данных", value: byteString(dbBytes),
                                  icon: "cylinder", subtitle: "история + словарь")
                         StatCard(title: "Модель \(AppSettings.shared.sttEngine.shortName)", value: byteString(modelsBytes),
-                                 icon: "cpu", subtitle: settings.modelName)
+                                 icon: "cpu", subtitle: "скачана при выборе движка")
                         StatCard(title: "Итого", value: byteString(dbBytes + modelsBytes), icon: "internaldrive")
                     }
                 }
@@ -80,17 +81,10 @@ struct DashboardView: View {
                 Group {
                     sectionTitle("Настройки")
                     HStack(spacing: 12) {
-                        StatCard(title: "Модель", value: shortModelName(settings.modelName), icon: "brain")
+                        StatCard(title: "Движок", value: settings.sttEngine.shortName, icon: "brain")
                         StatCard(title: "Hotkey", value: settings.hotkey.displayName, icon: "keyboard")
                         StatCard(title: "Порог подтверждений", value: "\(settings.minConfirmedToApply)",
                                  icon: "checkmark.shield", subtitle: "сколько раз править до автоприменения")
-                    }
-                    HStack(spacing: 12) {
-                        StatCard(title: "Старт приложения", value: "С прогревом",
-                                 icon: "bolt",
-                                 subtitle: "Модель грузится при запуске")
-                        StatCard(title: "Следующая загрузка модели", value: nextLoadEstimate.0,
-                                 icon: "clock.arrow.2.circlepath", subtitle: nextLoadEstimate.1)
                     }
                 }
 
@@ -124,10 +118,14 @@ struct DashboardView: View {
         refreshTick += 1
     }
 
-    /// WhisperKit downloads models into `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/<modelName>/`.
+    /// Папка модели активного движка: GigaAM — наша, Parakeet — FluidAudio.
     private func hubModelsURL() -> URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        return docs.appendingPathComponent("huggingface/models/argmaxinc/whisperkit-coreml/\(settings.modelName)", isDirectory: true)
+        switch settings.sttEngine {
+        case .gigaAM: return GigaAMTranscriber.modelDir
+        case .parakeet:
+            return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("FluidAudio", isDirectory: true)
+        }
     }
 
     private func fileSize(at url: URL) -> Int64 {
@@ -176,28 +174,6 @@ struct DashboardView: View {
         return f.string(from: d)
     }
 
-    /// Predicts how fast the next model load will be based on:
-    ///  • whether the current model has ever loaded successfully (then ANE has a kernel cache)
-    ///  • how long ago that was (cache is OS-managed; usually preserved across launches but
-    ///    can be evicted on disk pressure or OS updates)
-    private var nextLoadEstimate: (String, String) {
-        let lastModel = settings.lastSuccessfulModelId
-        let lastAt = settings.lastSuccessfulLoadAt
-        if lastModel.isEmpty || lastAt == 0 {
-            return ("Долгая", "Эта модель ещё не загружалась — первый раз ANE будет компилировать 3–10 мин")
-        }
-        if lastModel != settings.modelName {
-            return ("Долгая", "Сменилась модель — для новой ANE нужно скомпилировать (3–10 мин)")
-        }
-        // Same model loaded before → subsequent loads use cached ANE binaries.
-        return ("Быстрая (~3 сек)", "ANE-кэш этой модели прогрет; загрузка из cold start будет мгновенной")
-    }
-
-    private func shortModelName(_ raw: String) -> String {
-        // raw like "large-v3-v20240930_turbo_632MB" — return the human-friendly piece.
-        if let choice = WhisperModelChoice(rawValue: raw) { return choice.displayName.components(separatedBy: " (").first ?? raw }
-        return raw
-    }
 }
 
 private struct StatCard: View {

@@ -2,14 +2,11 @@ import Foundation
 import FluidAudio
 import Combine
 
-/// Опциональный движок распознавания на NVIDIA Parakeet TDT v3 через FluidAudio
-/// (CoreML/ANE). По сравнению с WhisperKit: ~5× быстрее, ~66 МБ RAM, нативно держит
-/// длинное аудио (нет 223-токенного потолка → не нужен наш pre-chunking) и поддерживает
-/// русский. Слабее с пунктуацией — компенсируется нашим PunctuationFixer на этапе
-/// постобработки (см. AppController.finalize).
-///
-/// Дефолтный движок остаётся WhisperKit; Parakeet включается в Настройках, и его модель
-/// (~600 МБ) скачивается только при первом выборе — вес дефолтной сборки не растёт.
+/// Движок распознавания на NVIDIA Parakeet TDT v3 через FluidAudio (CoreML/ANE): быстрый,
+/// ~66 МБ RAM, 25 европейских языков (в отличие от GigaAM, который только русский).
+/// Длинную запись режем тем же `Transcriber.chunkBySilence`, что и GigaAM (пунктуацию
+/// FluidAudio даёт только на одном окне ≤15 с). Модель (~600 МБ) скачивается при
+/// первом выборе движка.
 ///
 /// Зеркалит минимальную поверхность, которую дёргают AppController и UI: `state`,
 /// `lastProcessingMs`, `ensureLoaded()`, `transcribe(audio:)`. Состояние использует тот
@@ -110,8 +107,8 @@ final class ParakeetTranscriber: ObservableObject {
         state = .loading
         DebugLog.log("Parakeet: load() begin (v3)")
         do {
-            // Idempotent download (cached after first run) with progress, mirroring the
-            // WhisperKit path so the first-run ~600MB fetch shows a real percentage.
+            // Idempotent download (cached after first run) with progress, so the
+            // first-run ~600MB fetch shows a real percentage.
             let models = try await AsrModels.downloadAndLoad(
                 version: .v3,
                 progressHandler: { [weak self] progress in

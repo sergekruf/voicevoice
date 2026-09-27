@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct ReadyToast: View {
-    @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
     @ObservedObject private var settings = AppSettings.shared
@@ -9,7 +8,6 @@ struct ReadyToast: View {
     /// Состояние активного движка (раньше тост показывал только Whisper).
     private var state: Transcriber.ModelState {
         switch settings.sttEngine {
-        case .whisperKit: return transcriber.state
         case .parakeet: return parakeet.state
         case .gigaAM: return gigaam.state
         }

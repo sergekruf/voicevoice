@@ -76,7 +76,7 @@ struct OnboardingView: View {
             Step(
                 number: 4,
                 title: "Скачивание модели",
-                description: "При первом запуске WhisperKit скачает large-v3-turbo (~626 МБ) в ~/Documents/huggingface/models/.",
+                description: "При первом запуске скачается модель выбранного движка (~400–600 МБ): GigaAM — для русского, Parakeet — для 25 европейских языков. Движок меняется в настройках.",
                 done: false
             ) {
                 EmptyView()

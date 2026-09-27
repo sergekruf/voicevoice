@@ -17,7 +17,6 @@ struct VoiceVoiceApp: App {
 
 private struct MenuBarLabel: View {
     @ObservedObject private var controller = AppController.shared
-    @ObservedObject private var transcriber = Transcriber.shared
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
     @ObservedObject private var settings = AppSettings.shared
@@ -25,7 +24,6 @@ private struct MenuBarLabel: View {
     /// State of whichever engine is currently selected.
     private var engineState: Transcriber.ModelState {
         switch settings.sttEngine {
-        case .whisperKit: return transcriber.state
         case .parakeet: return parakeet.state
         case .gigaAM: return gigaam.state
         }
@@ -52,31 +50,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Ensure we're a UIElement (no Dock icon) regardless of bundle Info.plist quirks.
         NSApp.setActivationPolicy(.accessory)
 
-        // Скрытый отладочный режим: `VoiceVoice --sage-test "текст"` — прогоняет текст
-        // через SageCorrectorService (полный Swift-путь: токенизатор → bias → greedy →
-        // диф-гард) и завершается, минуя bootstrap. Для сверки с Python-эталоном
-        // (.mltools/eval_sage.py) без записи с микрофона.
-        if let idx = CommandLine.arguments.firstIndex(of: "--sage-test"),
-           idx + 1 < CommandLine.arguments.count {
-            let text = CommandLine.arguments[idx + 1]
-            Task { @MainActor in
-                // 3 прогона: №1 показывает холодный старт (компиляция GPU-пайплайнов),
-                // №2–3 — устоявшуюся скорость резидентного процесса (как в жизни).
-                var out = ""
-                for run in 1...3 {
-                    let t0 = Date()
-                    out = await SageCorrectorService.shared.correct(text)
-                    print("SAGE-TEST run \(run): \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
-                }
-                print("SAGE-TEST IN : \(text)")
-                print("SAGE-TEST OUT: \(out)")
-                exit(0)
-            }
-            return
-        }
-
         // Скрытый отладочный режим: `VoiceVoice --transcribe-test a.wav b.wav …` —
-        // прогоняет аудиофайлы через GigaAM (нарезка, стыки, склейка) без микрофона.
+        // прогоняет аудиофайлы через GigaAM (или Parakeet при VOICEVOICE_ENGINE=parakeet) —
+        // нарезка, стыки, склейка — без микрофона.
         if let idx = CommandLine.arguments.firstIndex(of: "--transcribe-test"),
            idx + 1 < CommandLine.arguments.count {
             let paths = Array(CommandLine.arguments[(idx + 1)...])
@@ -84,7 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for path in paths {
                     do {
                         let audio = try AudioFileDecoder.decode(url: URL(fileURLWithPath: path))
-                        let out = await GigaAMTranscriber.shared.transcribe(audio: audio)
+                        let out = ProcessInfo.processInfo.environment["VOICEVOICE_ENGINE"] == "parakeet"
+                            ? await ParakeetTranscriber.shared.transcribe(audio: audio)
+                            : await GigaAMTranscriber.shared.transcribe(audio: audio)
                         print("TRANSCRIBE-TEST \((path as NSString).lastPathComponent): \(out)")
                     } catch {
                         print("TRANSCRIBE-TEST \(path): \(error.localizedDescription)")
@@ -159,40 +137,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             print("\nверно: \(ok)/\(cases.count + moves.count)")
             exit(0)
-        }
-
-        // Скрытый отладочный режим: `VoiceVoice --pipeline-test a.wav b.wav …` — для
-        // сравнения качества: каждое аудио через GigaAM, затем через «Глубокую чистку»;
-        // печатает оба текста (после общего шага «?») и время, строкой JSON на файл.
-        if let idx = CommandLine.arguments.firstIndex(of: "--pipeline-test"),
-           idx + 1 < CommandLine.arguments.count {
-            let paths = Array(CommandLine.arguments[(idx + 1)...])
-            Task { @MainActor in
-                LLMEditorService.shared.ensureLoaded()
-                while true {
-                    if case .ready = LLMEditorService.shared.state { break }
-                    if case .error = LLMEditorService.shared.state { break }
-                    try? await Task.sleep(nanoseconds: 300_000_000)
-                }
-                for path in paths {
-                    guard let audio = try? AudioFileDecoder.decode(url: URL(fileURLWithPath: path)) else { continue }
-                    var t0 = Date()
-                    let engine = await GigaAMTranscriber.shared.transcribe(audio: audio)
-                    let engineMs = Int(Date().timeIntervalSince(t0) * 1000)
-                    t0 = Date()
-                    let llm = await LLMEditorService.shared.correct(engine)
-                    let llmMs = Int(Date().timeIntervalSince(t0) * 1000)
-                    let row: [String: Any] = [
-                        "file": (path as NSString).lastPathComponent,
-                        "engine": PunctuationFixer.restoreQuestionMarks(engine), "engineMs": engineMs,
-                        "llm": PunctuationFixer.restoreQuestionMarks(llm), "llmMs": llmMs,
-                    ]
-                    if let data = try? JSONSerialization.data(withJSONObject: row),
-                       let line = String(data: data, encoding: .utf8) { print("PIPELINE " + line) }
-                }
-                exit(0)
-            }
-            return
         }
 
         // Скрытый отладочный режим: `VoiceVoice --question-test` — потерянный «?»
@@ -307,34 +251,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
 
-        // Скрытый отладочный режим: `VoiceVoice --mine-history` — печатает кандидатов
-        // в словарь из истории (то же, что кнопка «Разбор диктовок…»), плюс самотест
-        // извлечения пар на синтетике, т.к. у старых записей сырого текста нет.
-        if CommandLine.arguments.contains("--mine-history") {
-            let records = HistoryStore.shared.recent(limit: 500)
-            let withEngine = records.filter { !$0.engineText.isEmpty }
-            let candidates = HistoryMining.candidates(from: records,
-                                                      existing: CorrectionStore.shared.allOrdered())
-            print("MINE: записей \(records.count), с сырым текстом движка \(withEngine.count), кандидатов \(candidates.count)")
-            for c in candidates { print("  «\(c.wrong)» → «\(c.right)» ×\(c.count)  — \(c.example)") }
-
-            print("\n=== самотест извлечения пар ===")
-            let cases: [(String, String, String)] = [
-                ("Найди вотов по Ozon и дай ответ", "Найди ботов по Ozon и дай ответ", "вотов→ботов"),
-                ("Перейти в колонку и того", "Перейти в колонку итого", "и того→итого"),
-                ("Руководство по фронтенту", "Руководство по фронтенду", "фронтенту→фронтенду"),
-                ("Отправь отчёт сегодня", "Отправь отчёт сегодня.", "(только пунктуация — не берём)"),
-                ("по ещё каким-то задаче", "по ещё каким-то задачам", "(обычное слово — не берём)"),
-            ]
-            for (before, after, expect) in cases {
-                let pairs = HistoryMining.replacements(from: before, to: after)
-                    .filter { HistoryMining.isWorthLearning(wrong: $0.0, right: $0.1) }
-                let got = pairs.map { "\($0.0)→\($0.1)" }.joined(separator: ", ")
-                print("  ожидалось \(expect):  получено [\(got)]")
-            }
-            exit(0)
-        }
-
         // Скрытый отладочный режим: `VoiceVoice --learn-test` — прогоняет контрольные
         // пары через фильтр захвата автословаря (какие правки попадут в словарь).
         if CommandLine.arguments.contains("--learn-test") {
@@ -394,37 +310,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       + (f.neverUsed ? " · не применялось" : ""))
             }
             exit(0)
-        }
-
-        // Скрытый отладочный режим: `VoiceVoice --llm-test "текст"` — прогоняет текст
-        // через LLMEditorService (загрузка/скачивание модели, промпт, гарды) и
-        // завершается, минуя bootstrap. Сверка с прототипом `.mltools/eval_llm_editor.py`.
-        if let idx = CommandLine.arguments.firstIndex(of: "--llm-test"),
-           idx + 1 < CommandLine.arguments.count {
-            let text = CommandLine.arguments[idx + 1]
-            Task { @MainActor in
-                // Дождаться скачивания модели (correct() его не ждёт — в жизни
-                // диктовка не должна висеть минуты), иначе процесс выйдет раньше.
-                LLMEditorService.shared.ensureLoaded()
-                waiting: while true {
-                    switch LLMEditorService.shared.state {
-                    case .ready, .error: break waiting
-                    case .downloading(let p): print("LLM-TEST downloading \(Int(p * 100))%")
-                    default: break
-                    }
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
-                var out = ""
-                for run in 1...2 {
-                    let t0 = Date()
-                    out = await LLMEditorService.shared.correct(text)
-                    print("LLM-TEST run \(run): \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
-                }
-                print("LLM-TEST IN : \(text)")
-                print("LLM-TEST OUT: \(out)")
-                exit(0)
-            }
-            return
         }
 
         // Скрытый отладочный режим: `VoiceVoice --update-test [install]` — проверка

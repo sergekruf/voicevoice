@@ -8,21 +8,26 @@
 
 🇷🇺 [Читать на русском](README.md)
 
-**Voice dictation for macOS with local Whisper.** Hold `Fn`, talk, release — the text appears in any active input field. Recognition runs entirely on your machine via the Apple Neural Engine — not a single phrase leaves your computer.
+**Voice dictation for macOS with local speech recognition.** Hold `Fn`, talk, release — the text appears in any active input field. Recognition runs entirely on your machine via the Apple Neural Engine — not a single phrase leaves your computer.
 
 Landing: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) · Pre-built `.dmg` available
 
 ## Features
 
 - **Hotkey-driven dictation** — `Fn` (default), right `⌥ Option`, or `Caps Lock`. Hold → talk → release → text in your field.
-- **Local Whisper** (`large-v3-turbo`, 4-bit quantized, ~632 MB) via [WhisperKit](https://github.com/argmaxinc/WhisperKit). Inference on the Apple Neural Engine, ~10× faster than real-time on M4.
+- **Two local engines**:
+  - [**GigaAM-v3**](https://github.com/salute-developers/GigaAM) (Sber) — best quality for Russian: punctuation and digits out of the box. Beam-search decoding with hotword biasing from your dictionary (Claude, API…). ~400 MB model.
+  - [**Parakeet TDT v3**](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) via [FluidAudio](https://github.com/FluidInference/FluidAudio) — fast, 25 European languages. ~600 MB model.
+
+  The selected engine's model downloads on first launch; inference runs on the Apple Neural Engine, 0.1–0.5 s per phrase. The app itself is ~14 MB and uses ~80 MB of RAM.
+- **Long dictations without broken sentences** — audio is cut at pauses and chunk seams are re-checked with context, so false periods, «?» and capitals mid-sentence are removed. Lost «?» is restored from grammar.
 - **Adaptive dictionary** — for ~5 minutes after a successful paste, VoiceVoice watches the focused field. If you correct the recognized text, it remembers `wrong → right` pairs and auto-applies them on subsequent dictations.
-- **Fuzzy matching** with configurable threshold — a `клод код → Claude Code` rule also fires on `клот кот`, `клоуд код`, etc.
+- **Fuzzy matching** with configurable threshold — a `клод код → Claude Code` rule also fires on `клот кот`, `клоуд код`, etc. Ordinary Russian words are never fuzzy-replaced.
+- **Dictionary audit** — on a schedule, finds rules that may damage text (ordinary-word replacements, duplicates) and suggests removing them.
 - **Edit & Learn** for apps where Accessibility can't read field contents (Bitrix24, Max, Slack, Termius…) — one-click manual correction from the HUD.
 - **Three-tier paste**: CGEvent ⌘V → AppleScript → AXUIElement direct write. Text reaches anywhere — Notes, Safari, Telegram, Termius, Slack, VS Code, Cursor, Claude Desktop, Max, Bitrix24…
 - **TransientType marker** for clipboard managers (Maccy / Paste / PasteNow / Raycast) — our temporary clipboard writes don't pollute your history.
-- **Number normalization** — `«один миллион четыреста двадцать пять»` → `1 425 689`, extra spaces and periods stripped.
-- **Auto-emoji** (optional) — appends one contextual emoji on trigger words: «спасибо» → 🙏, «поздравляю» → 🎉, «хаха» → 😄, etc.
+- **Number normalization** — «две тысячи пятьсот тридцать два» → `2532`, ordinals → «24-го», «три с половиной» → `3,5`.
 - **Result HUD** + history of last 200 transcriptions + searchable dictionary.
 - **Quiet mode** — hide all popups / toasts while keeping the recording indicator visible. Great for screencasts.
 - **Privacy-by-default** — zero telemetry, zero cloud, sandbox-compatible, ad-hoc signed with a stable identity (TCC permissions survive rebuilds).
@@ -30,7 +35,7 @@ Landing: [voicevoice.vectrolab.ru](https://voicevoice.vectrolab.ru) · Pre-built
 ## Requirements
 
 - macOS **14 Sonoma** or newer
-- Apple Silicon (M1 / M2 / M3 / M4 / M5) — on Intel Macs Whisper falls back to CPU and runs 5–10× slower, making interactive dictation impractical
+- Apple Silicon (M1 / M2 / M3 / M4 / M5) — models run on the Neural Engine; there is no Intel build
 - Xcode 15+ (only if building from source)
 - Microphone + Accessibility permissions (requested on first launch)
 
@@ -50,7 +55,7 @@ cd voicevoice
 open build/VoiceVoice.app
 ```
 
-Or via Xcode: `open Package.swift`, wait for WhisperKit + GRDB resolution, hit ▶︎ Run.
+Or via Xcode: `open Package.swift`, wait for FluidAudio + GRDB resolution, hit ▶︎ Run.
 
 ## First launch
 
@@ -58,13 +63,13 @@ Or via Xcode: `open Package.swift`, wait for WhisperKit + GRDB resolution, hit �
    - **Microphone** — click "Request access".
    - **Accessibility** — needed to globally hear `Fn` and emulate `⌘V`. macOS opens System Settings → Privacy & Security → Accessibility; manually toggle VoiceVoice on.
 2. **Disable system dictation:** System Settings → Keyboard → Dictation → off. Otherwise macOS's overlay intercepts `Fn` on top of ours.
-3. On first launch WhisperKit downloads the `large-v3-turbo` model (~632 MB) to `~/Library/Application Support/VoiceVoice/models/`. Progress shows in the menu bar.
+3. On first launch the selected engine's model downloads (~400–600 MB). Switch engines in Settings: GigaAM for Russian, Parakeet for other languages. Progress shows in the menu bar.
 
 ## Usage
 
 1. Put the cursor in any text field.
 2. **Hold Fn** → the "Recording…" indicator appears.
-3. Speak. You can dictate punctuation explicitly («запятая», «точка», «вопросительный знак») — Whisper places them reasonably well on its own.
+3. Speak. No need to dictate punctuation — GigaAM places it on its own.
 4. **Release Fn** → after ~0.5–1 s (on M4) the text appears in the field.
 5. If something was misrecognized — the auto-dictionary picks up your manual fix if you correct it within 5 minutes. For apps without AX support — click "Edit & Learn" in the HUD.
 
@@ -73,7 +78,7 @@ Or via Xcode: `open Package.swift`, wait for WhisperKit + GRDB resolution, hit �
 ```
 ~/Library/Application Support/VoiceVoice/
 ├── data.db           # SQLite (GRDB): dictionary + history
-└── models/           # WhisperKit CoreML models
+└── models/GigaAM/    # GigaAM Core ML model; Parakeet lives in ~/Library/Application Support/FluidAudio
 ```
 
 Wipe everything:
@@ -85,27 +90,31 @@ rm -rf "$HOME/Library/Application Support/VoiceVoice"
 
 ```
 voicevoice/
-├── Package.swift                 # SwiftPM manifest (WhisperKit, GRDB)
+├── Package.swift                 # SwiftPM manifest (FluidAudio, GRDB)
 ├── build-app.sh                  # build .app bundle from CLI
 ├── make-dmg.sh                   # build installer .dmg
 ├── setup-signing.sh              # create self-signed identity
 └── Sources/VoiceVoice/
     ├── VoiceVoiceApp.swift       # @main, MenuBarExtra
-    ├── Resources/                # Info.plist, entitlements
+    ├── Resources/                # Info.plist, entitlements, GigaAM word pieces
     ├── Models/                   # AppSettings, CorrectionEntry, TranscriptionRecord
     ├── Storage/                  # GRDB Database, CorrectionStore, HistoryStore
     ├── Services/
     │   ├── AudioRecorder.swift   # AVAudioEngine 16 kHz mono
-    │   ├── Transcriber.swift     # WhisperKit wrapper
-    │   ├── HotkeyMonitor.swift   # global CGEvent tap
+    │   ├── GigaAMTranscriber.swift # GigaAM-v3 on Core ML (encoder on ANE)
+    │   ├── RNNTBeamSearch.swift  # beam search + hotword biasing
+    │   ├── ParakeetTranscriber.swift # Parakeet via FluidAudio
+    │   ├── Transcriber.swift     # shared: pause-based chunking, joining, seams
+    │   ├── PunctuationFixer.swift # clause merging, lost «?» restoration
+    │   ├── HotkeyMonitor.swift   # глобальный CGEvent-tap
     │   ├── TextInserter.swift    # three-tier paste + TransientType marker
     │   ├── TextChangeWatcher.swift # auto-dictionary via AX polling + BFS
     │   ├── ClipboardSnapshot.swift # NSPasteboard snapshot / restore
     │   ├── NumberNormalizer.swift
-    │   ├── EmojiEnhancer.swift   # auto-emoji
     │   ├── Tokenizer.swift       # Unicode word/non-word tokens
     │   ├── DiffEngine.swift      # token-level LCS diff
     │   ├── CorrectionApplier.swift # apply dictionary (exact + fuzzy)
+    │   ├── DictionaryAudit.swift # dictionary audit
     │   └── AppController.swift   # orchestrator
     └── Views/
         ├── SettingsView.swift    # settings + HelpHint (`?` tooltips)
@@ -127,7 +136,8 @@ voicevoice/
 ## Stack
 
 - **Swift 6** / **SwiftUI** / **AppKit** (MenuBarExtra, NSPanel, AXUIElement)
-- [**WhisperKit**](https://github.com/argmaxinc/WhisperKit) (CoreML + ANE)
+- [**GigaAM-v3**](https://github.com/salute-developers/GigaAM) (converted to Core ML, encoder on ANE)
+- [**FluidAudio**](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3)
 - [**GRDB**](https://github.com/groue/GRDB.swift) (SQLite wrapper)
 
 ## Contributing
@@ -136,7 +146,7 @@ Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Code style: Swif
 
 ## License
 
-MIT — see [LICENSE](LICENSE). WhisperKit and GRDB are also MIT.
+MIT — see [LICENSE](LICENSE). GigaAM and GRDB are MIT, FluidAudio is Apache 2.0, the Parakeet model is CC-BY-4.0.
 
 ---
 
