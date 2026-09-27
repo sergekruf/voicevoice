@@ -589,6 +589,7 @@ final class AppController: ObservableObject {
         // Не зависят от движка: рубленые фразы перед
         // «а / но / хотя / потому что…» склеиваются запятой, потерянный «?» ставится
         // там, где вопрос однозначен по грамматике.
+        appliedText = PunctuationFixer.joinYandexServices(appliedText)
         let merged = PunctuationFixer.mergeContinuationClauses(appliedText)
         if merged != appliedText { DebugLog.log("App: склейка союзов — «\(appliedText.suffix(60))» → «\(merged.suffix(60))»") }
         appliedText = PunctuationFixer.restoreQuestionMarks(merged)
@@ -714,7 +715,8 @@ final class AppController: ObservableObject {
         guard !rawText.isEmpty else { return rawText }
         let dictText = applier.apply(to: rawText).text
         let t = settings.normalizeNumbers ? NumberNormalizer.normalize(dictText) : dictText
-        return PunctuationFixer.restoreQuestionMarks(PunctuationFixer.mergeContinuationClauses(t))
+        return PunctuationFixer.restoreQuestionMarks(
+            PunctuationFixer.mergeContinuationClauses(PunctuationFixer.joinYandexServices(t)))
     }
 
     // MARK: - Edit & Learn

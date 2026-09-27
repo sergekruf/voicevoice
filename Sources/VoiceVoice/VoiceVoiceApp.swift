@@ -256,6 +256,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("\(got == expected ? "PASS" : "FAIL")  \(got)\(got == expected ? "" : "\n      ожидалось: \(expected)")")
             }
             print("\nверно: \(ok)/\(cases.count)")
+            let yandex: [(String, String)] = [
+                ("Это метатег от Яндекс. Метрики. И подскажу теперь", "Это метатег от Яндекс Метрики, и подскажу теперь."),
+                ("Как дать тебе доступ к Яндекс. Метрике, чтобы ты вытаскивал", "Как дать тебе доступ к Яндекс Метрике, чтобы ты вытаскивал."),
+                ("на Ozon, Wildberries или Яндекс.Маркет.", "на Ozon, Wildberries или Яндекс Маркет."),
+                ("Положи в Яндекс. Диск и Яндекс.Go", "Положи в Яндекс Диск и Яндекс Go."),
+                ("Я работаю в Яндекс. Мне там нравится.", "Я работаю в Яндекс. Мне там нравится."),
+                ("Зашёл в Яндекс. Картошку купил.", "Зашёл в Яндекс. Картошку купил."),
+                ("Настроены на Яндекс Маркет", "Настроены на Яндекс Маркет."),
+            ]
+            var yok = 0
+            for (input, expected) in yandex {
+                let got = PunctuationFixer.restoreQuestionMarks(
+                    PunctuationFixer.mergeContinuationClauses(PunctuationFixer.joinYandexServices(input)))
+                if got == expected { yok += 1 }
+                print("\(got == expected ? "PASS" : "FAIL")  \(got)\(got == expected ? "" : "\n      ожидалось: \(expected)")")
+            }
+            print("\nЯндекс: \(yok)/\(yandex.count)")
             exit(0)
         }
 
