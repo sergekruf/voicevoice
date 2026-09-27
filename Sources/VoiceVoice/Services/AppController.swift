@@ -223,6 +223,9 @@ final class AppController: ObservableObject {
         settings.onboardingDone = true
         onboardingNeeded = false
         hotkeys.start(with: settings.hotkey)
+        // Слежение за клавишей быстрой правки, поставленное при запуске до выдачи
+        // Универсального доступа, мёртвое — ставим заново, как и Fn.
+        QuickFixService.shared.start()
         ensureActiveEngineLoaded()
         recorder.startWarmListening()   // разрешение на микрофон только что выдано
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {

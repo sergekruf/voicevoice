@@ -113,6 +113,7 @@ struct OnboardingView: View {
 
         if force && newTap {
             HotkeyMonitor.shared.start(with: AppSettings.shared.hotkey)
+            QuickFixService.shared.start()
         }
     }
 
