@@ -27,7 +27,7 @@ final class CorrectionApplier {
     /// Apply learned corrections. For each input position we try the longest matching dictionary
     /// entry first; if no entry matches exactly AND fuzzy matching is on, we also try fuzzy
     /// matches (Levenshtein on normalized form, within threshold).
-    func apply(to raw: String) -> ApplyResult {
+    func apply(to raw: String, fuzzy fuzzyOverride: Bool? = nil) -> ApplyResult {
         let tokens = Tokenizer.tokenize(raw)
         let entries = store.allOrdered()
         guard !entries.isEmpty else {
@@ -35,7 +35,7 @@ final class CorrectionApplier {
         }
 
         let minConfirmed = settings.minConfirmedToApply
-        let fuzzyOn = settings.fuzzyMatching
+        let fuzzyOn = fuzzyOverride ?? settings.fuzzyMatching
         let fuzzyThreshold = settings.fuzzyThreshold
 
         let prepared: [PreparedEntry] = entries.compactMap { entry in
@@ -156,6 +156,9 @@ final class CorrectionApplier {
 
         let dist = inputPhrase.levenshteinDistance(to: dictPhrase)
         if dist > maxAllowed { return nil }
+        // Нечёткое совпадение спасает ослышки, а не обычные слова: иначе правило
+        // «клуд → клод» ловило «клуб», а «какое-то → …» — любые «какие-то»/«какой-то».
+        if DictionaryAudit.isRealRussian(collected.joined(separator: " ")) { return nil }
 
         return ti
     }

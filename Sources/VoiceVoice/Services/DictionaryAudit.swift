@@ -100,7 +100,18 @@ enum DictionaryAudit {
     /// орфограф пропускает без проверки, поэтому считаем их аббревиатурами
     /// («влк», «бпл») — то есть законной целью для замены.
     static func isRealRussian(_ phrase: String) -> Bool {
-        let words = phrase.split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init)
+        // Знаки препинания — не слова («, какое-то» раньше проходило как не-слово из-за
+        // запятой); «какое-то», «где-нибудь» проверяем по основе до частицы.
+        var words: [String] = []
+        for token in phrase.split(separator: " ") {
+            var parts = token.split(separator: "-").map { String($0.filter { $0.isLetter }) }
+                .filter { !$0.isEmpty }
+            if parts.count > 1, let last = parts.last,
+               ["то", "либо", "нибудь", "ка", "таки", "де"].contains(last.lowercased()) {
+                parts.removeLast()
+            }
+            words += parts
+        }
         guard !words.isEmpty else { return false }
         let checker = NSSpellChecker.shared
         for word in words {

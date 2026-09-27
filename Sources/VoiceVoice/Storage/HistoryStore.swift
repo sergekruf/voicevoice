@@ -31,6 +31,7 @@ final class HistoryStore {
                 try rec.update(db)
             }
         }
+        AudioArchive.updateFinalText(finalText, historyId: id)
     }
 
     func recent(limit: Int = 50) -> [TranscriptionRecord] {

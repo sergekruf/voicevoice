@@ -41,6 +41,8 @@ let package = Package(
             resources: [
                 // RUPunct punctuation model + tokenizer (bundled, loaded via Bundle.module).
                 .copy("Resources/RUPunct"),
+                // Куски SentencePiece GigaAM с оценками — разбиение подсказанных терминов.
+                .copy("Resources/GigaAM"),
             ]
         ),
     ]

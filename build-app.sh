@@ -18,10 +18,18 @@ STAGE_DIR="/tmp/voicevoice-build-$$"
 APP_DIR="$STAGE_DIR/${APP_NAME}.app"
 trap 'rm -rf "$STAGE_DIR"' EXIT
 
-echo "==> Building Swift package ($CONFIG)…"
-swift build -c "$CONFIG" --arch arm64
+# Swift 6.4 (Xcode 27) по умолчанию собирает через swiftbuild, а тот сам компилирует
+# .metal-файлы mlx-swift и требует отдельный Metal Toolchain. Ядра MLX мы берём
+# готовыми (см. ниже), поэтому остаёмся на прежней системе сборки.
+BUILD_SYSTEM=()
+if swift build --help 2>/dev/null | grep -q -- '--build-system'; then
+    BUILD_SYSTEM=(--build-system native)
+fi
 
-BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$APP_NAME"
+echo "==> Building Swift package ($CONFIG)…"
+swift build -c "$CONFIG" --arch arm64 "${BUILD_SYSTEM[@]}"
+
+BIN_PATH="$(swift build -c "$CONFIG" --arch arm64 "${BUILD_SYSTEM[@]}" --show-bin-path)/$APP_NAME"
 if [[ ! -f "$BIN_PATH" ]]; then
     echo "Binary not found at $BIN_PATH"; exit 1
 fi

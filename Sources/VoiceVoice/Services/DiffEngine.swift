@@ -119,10 +119,16 @@ enum DiffEngine {
         return result
     }
 
-    /// Склеивает токены блока в один «фразовый» токен, обрезая крайние пробелы:
-    /// внутренние остаются, чтобы «вент система» не превратилось в «вентсистема».
+    /// Склеивает токены блока в один «фразовый» токен. Крайние не-слова (пробелы и
+    /// знаки) отрезаются: удалённая запятая перед правкой иначе попадала в правило
+    /// («, какое-то» → «и какие-то»), и проверка «левая часть — обычное слово» его
+    /// пропускала. Внутренние пробелы остаются, чтобы «вент система» не стало
+    /// «вентсистема».
     private static func joinedToken(_ tokens: [Token]) -> Token {
-        let text = tokens.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        var slice = tokens[...]
+        while let first = slice.first, !first.isWord { slice = slice.dropFirst() }
+        while let last = slice.last, !last.isWord { slice = slice.dropLast() }
+        let text = slice.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
         return Token(kind: .word, text: text)
     }
 }

@@ -106,6 +106,12 @@ final class AppSettings: ObservableObject {
     @AppStorage("minConfirmedToApply") var minConfirmedToApply: Int = 1
     /// Whether the dictionary applies fuzzy phrase matching (Levenshtein on normalized text).
     @AppStorage("fuzzyMatching") var fuzzyMatching: Bool = true
+    /// Сохранять аудио диктовок локально для проверки качества распознавания (AudioArchive).
+    @AppStorage("keepDictationAudio") var keepDictationAudio: Bool = false
+    /// GigaAM: ширина поиска при декодировании (1 — жадный, как раньше) и подсказка
+    /// движку терминов из словаря правок (RNNTBeamSearch).
+    @AppStorage("gigaamBeamSize") var gigaamBeamSize: Int = 4
+    @AppStorage("gigaamHotwords") var gigaamHotwords: Bool = true
     /// Maximum allowed Levenshtein-distance / max-length ratio for a fuzzy match (0..1).
     @AppStorage("fuzzyThreshold") var fuzzyThreshold: Double = 0.25
     /// Persistent counter of dictionary substitutions ever applied (exact + fuzzy).

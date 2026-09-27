@@ -439,18 +439,25 @@ final class Transcriber: ObservableObject {
     /// их уберёт (см. `joinChunkTexts`). Последний кусок всегда `realPauseAfter == true`.
     struct AudioChunk { let samples: [Float]; let realPauseAfter: Bool }
 
-    static func chunkBySilence(_ audio: [Float]) -> [AudioChunk] {
-        if audio.count <= chunkCutoffSamples { return [AudioChunk(samples: audio, realPauseAfter: true)] }
+    /// `windowSeconds` — сколько движок принимает за один проход: 15 с у Parakeet и
+    /// Whisper-пути, у GigaAM — окно сконвертированной модели (до 25 с). Цель реза —
+    /// окно минус 3 с, запас на поиск паузы вперёд — 2 с, так что кусок всегда влезает.
+    static func chunkBySilence(_ audio: [Float], windowSeconds: Int = 15) -> [AudioChunk] {
+        let sr = Int(AudioRecorder.targetSampleRate)
+        let maxChunk = (windowSeconds - 3) * sr      // 12 с при окне 15 с — как раньше
+        let cutoff = (windowSeconds - 2) * sr         // 13 с при окне 15 с
+        if audio.count <= cutoff { return [AudioChunk(samples: audio, realPauseAfter: true)] }
         let vad = EnergyVAD()  // sampleRate=16000, frameLengthSamples=1600 (0.1 с)
         var result: [AudioChunk] = []
         var cursor = 0
         while cursor < audio.count {
             let remaining = audio.count - cursor
-            if remaining <= chunkCutoffSamples {
+            if remaining <= cutoff {
                 result.append(AudioChunk(samples: Array(audio[cursor..<audio.count]), realPauseAfter: true))
                 break
             }
-            let (cutAt, realPause) = findSilenceCut(in: audio, from: cursor, upTo: audio.count, vad: vad)
+            let (cutAt, realPause) = findSilenceCut(in: audio, from: cursor, upTo: audio.count, vad: vad,
+                                                    maxChunk: maxChunk)
             result.append(AudioChunk(samples: Array(audio[cursor..<cutAt]), realPauseAfter: realPause))
             cursor = cutAt
         }
@@ -469,8 +476,9 @@ final class Transcriber: ObservableObject {
     ///      слепой индекс `target`.
     /// На ложной границе (2 и 3) склейка потом уберёт ложную точку/заглавную.
     /// Гарантирует `from < cut <= limit`.
-    static func findSilenceCut(in audio: [Float], from cursor: Int, upTo limit: Int, vad: EnergyVAD) -> (cut: Int, realPause: Bool) {
-        let target = cursor + maxChunkSamples
+    static func findSilenceCut(in audio: [Float], from cursor: Int, upTo limit: Int, vad: EnergyVAD,
+                               maxChunk: Int = maxChunkSamples) -> (cut: Int, realPause: Bool) {
+        let target = cursor + maxChunk
 
         // Фаза 1: настоящая пауза в широком окне (с запасом назад от цели).
         let wideStart = max(target - pauseLookbackWindowSamples, cursor + 1)
@@ -638,7 +646,8 @@ final class Transcriber: ObservableObject {
 
     // MARK: - Стык кусков: сверка с контекстным прогоном
 
-    /// Вердикт по стыку двух кусков, левый из которых кончается знаком конца предложения.
+    /// Вердикт по стыку двух кусков: левый кончается знаком конца предложения, либо знака
+    /// нет, а правый начат с заглавной (тогда `.continuation` просто сверяет регистр).
     /// Контекстный прогон делает движок (`GigaAMTranscriber.reconcileSeams`), здесь —
     /// текстовая часть: найти стык в контексте и перенести решение о знаке.
     enum SeamVerdict: Equatable {

@@ -42,6 +42,9 @@ final class AppController: ObservableObject {
     /// In-flight decode of the released dictation — cancellable by Esc while the
     /// model is still transcribing (or even still downloading/loading).
     private var transcribeTask: Task<Void, Never>?
+    /// Аудио текущей диктовки для архива проверки качества (только при включённом
+    /// «Сохранять аудио диктовок»); пишется после появления id записи в истории.
+    private var pendingArchiveAudio: [Float]?
     private var warmIdleTimer: Timer?
 
     private init() {
@@ -391,6 +394,7 @@ final class AppController: ObservableObject {
         SystemAudioMuter.shared.restore()   // звук возвращаем сразу, не дожидаясь распознавания
         let samples = recorder.stop()
         let duration = Double(samples.count) / AudioRecorder.targetSampleRate
+        pendingArchiveAudio = settings.keepDictationAudio ? samples : nil
         // RMS / peak of the captured buffer — confirms the mic actually picked up sound.
         var peak: Float = 0
         var sumSq: Double = 0
@@ -474,6 +478,12 @@ final class AppController: ObservableObject {
         if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
             appliedText = PunctuationFixer.fix(appliedText)
         }
+        // Не зависят ни от движка, ни от LLM, ни от тумблера выше: рубленые фразы перед
+        // «а / но / хотя / потому что…» склеиваются запятой, потерянный «?» ставится
+        // там, где вопрос однозначен по грамматике.
+        let merged = PunctuationFixer.mergeContinuationClauses(appliedText)
+        if merged != appliedText { DebugLog.log("App: склейка союзов — «\(appliedText.suffix(60))» → «\(merged.suffix(60))»") }
+        appliedText = PunctuationFixer.restoreQuestionMarks(merged)
         lastSubstitutions = applyResult.substitutions
 
         // Bump persistent counters for the Dashboard.
@@ -494,7 +504,11 @@ final class AppController: ObservableObject {
         )
         if let id = history.add(record) {
             record.id = id
+            if let audio = pendingArchiveAudio {
+                AudioArchive.save(audio, historyId: id, engineText: engineText, finalText: appliedText)
+            }
         }
+        pendingArchiveAudio = nil
         lastResult = record
 
         // Lifetime counters — the history table is trimmed to 200 rows, so we
@@ -591,6 +605,7 @@ final class AppController: ObservableObject {
         if settings.fixPunctuation && !settings.punctuationModel && settings.sttEngine != .gigaAM {
             t = PunctuationFixer.fix(t)
         }
+        t = PunctuationFixer.restoreQuestionMarks(PunctuationFixer.mergeContinuationClauses(t))
         return t
     }
 

@@ -321,13 +321,8 @@ final class LLMEditorService: ObservableObject {
             }
         }
         var result = pieces.joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        // Рубленые предложения с «А»/«Но»/«И» в начале — детерминированная склейка
-        // запятой (LLM это правило не выполняет, см. PunctuationFixer).
-        let merged = PunctuationFixer.mergeContinuationClauses(result)
-        if merged != result {
-            DebugLog.log("LLM: склейка союзов — \(Self.diffSummary(result, merged))")
-            result = merged
-        }
+        // Склейка «…. А/Но/Хотя…» запятой — детерминированная и живёт в общей
+        // обработке (AppController), чтобы работать и без LLM.
         // Заглавные посреди предложения: правкой текста модель их не снимает
         // (слишком осторожна), зато уверенно отвечает на вопрос «имя ли это?».
         result = await fixSuspiciousCapitals(result, container: container)

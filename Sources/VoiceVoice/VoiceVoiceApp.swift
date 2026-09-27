@@ -127,6 +127,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Созвучное слово, но сосед совпал только один — не трогаем.
                 ("Настроить здесь маршрутизацию?", "Трафика, чтобы сайты шли",
                  "как настроить маршрутизации трафика и сайты", .unmatched),
+                // Знака на стыке нет, заглавная — артефакт начала окна: в контексте строчная.
+                ("Можно сильно всё это дело", "Прокачать по удобству и функционалу",
+                 "получить от тебя обратную связь, то можно сильно всё это дело прокачать по удобству",
+                 .continuation(left: "Можно сильно всё это дело", right: "прокачать по удобству и функционалу",
+                               removedQuestion: false)),
+                // Знака нет, но это имя — в контексте тоже заглавная, регистр остаётся.
+                ("Вчера долго говорил с", "Сергеем про поставку",
+                 "вчера долго говорил с Сергеем про поставку и сроки",
+                 .continuation(left: "Вчера долго говорил с", right: "Сергеем про поставку", removedQuestion: false)),
                 // Совпала только пара без соседей — случайность, не трогаем.
                 ("Потом поедем в офис.", "В понедельник созвонимся.", "и офис в пятницу", .unmatched),
             ]
@@ -149,6 +158,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("\(pass ? "PASS" : "FAIL")  перенос «?»: \(got.text) (done=\(got.done))")
             }
             print("\nверно: \(ok)/\(cases.count + moves.count)")
+            exit(0)
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --pipeline-test a.wav b.wav …` — для
+        // сравнения качества: каждое аудио через GigaAM, затем через «Глубокую чистку»;
+        // печатает оба текста (после общего шага «?») и время, строкой JSON на файл.
+        if let idx = CommandLine.arguments.firstIndex(of: "--pipeline-test"),
+           idx + 1 < CommandLine.arguments.count {
+            let paths = Array(CommandLine.arguments[(idx + 1)...])
+            Task { @MainActor in
+                LLMEditorService.shared.ensureLoaded()
+                while true {
+                    if case .ready = LLMEditorService.shared.state { break }
+                    if case .error = LLMEditorService.shared.state { break }
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }
+                for path in paths {
+                    guard let audio = try? AudioFileDecoder.decode(url: URL(fileURLWithPath: path)) else { continue }
+                    var t0 = Date()
+                    let engine = await GigaAMTranscriber.shared.transcribe(audio: audio)
+                    let engineMs = Int(Date().timeIntervalSince(t0) * 1000)
+                    t0 = Date()
+                    let llm = await LLMEditorService.shared.correct(engine)
+                    let llmMs = Int(Date().timeIntervalSince(t0) * 1000)
+                    let row: [String: Any] = [
+                        "file": (path as NSString).lastPathComponent,
+                        "engine": PunctuationFixer.restoreQuestionMarks(engine), "engineMs": engineMs,
+                        "llm": PunctuationFixer.restoreQuestionMarks(llm), "llmMs": llmMs,
+                    ]
+                    if let data = try? JSONSerialization.data(withJSONObject: row),
+                       let line = String(data: data, encoding: .utf8) { print("PIPELINE " + line) }
+                }
+                exit(0)
+            }
+            return
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --question-test` — потерянный «?»
+        // (PunctuationFixer.restoreQuestionMarks) на контрольных фразах; с `history` —
+        // ещё и все места в истории, где шаг поставил бы «?».
+        if let idx = CommandLine.arguments.firstIndex(of: "--question-test") {
+            let cases: [(String, String)] = [
+                // Вопросы из истории диктовок.
+                ("Ребята сфоткали эти две модели. Что-то ещё было или это всё",
+                 "Ребята сфоткали эти две модели. Что-то ещё было или это всё?"),
+                ("А ты можешь сделать не одним файлом, а тремя отдельными файлами и каждый формата A4",
+                 "А ты можешь сделать не одним файлом, а тремя отдельными файлами и каждый формата A4?"),
+                ("А ты можешь на этом баннере просто логотип сделать красным.",
+                 "А ты можешь на этом баннере просто логотип сделать красным?"),
+                ("Так ли это? Какие модели мы можем изготовить. Я их добавлю на баннер.",
+                 "Так ли это? Какие модели мы можем изготовить? Я их добавлю на баннер."),
+                ("можем ли мы данные позиции продать немножко в убыток", "можем ли мы данные позиции продать немножко в убыток?"),
+                ("Ты можешь взять за основу этот постер и сделать 3 варианта,",
+                 "Ты можешь взять за основу этот постер и сделать 3 варианта?"),
+                // Вопросы, которых нет в истории.
+                ("Сколько коробок осталось на складе", "Сколько коробок осталось на складе?"),
+                ("Подскажи, где найти отчёт по продажам.", "Подскажи, где найти отчёт по продажам?"),
+                ("Мы успеем отгрузить до конца недели или нет", "Мы успеем отгрузить до конца недели или нет?"),
+                ("Сможешь посмотреть макет до вечера", "Сможешь посмотреть макет до вечера?"),
+                ("Отправил счёт, верно", "Отправил счёт, верно?"),
+                // Утверждения с «вопросительными» словами — не трогать; в конце точка.
+                ("Нужно обновить логотип", "Нужно обновить логотип."),
+                ("Можно сделать PNG.", "Можно сделать PNG."),
+                ("Когда придёт машина, позвони мне.", "Когда придёт машина, позвони мне."),
+                ("Как только закончишь, отправь отчёт", "Как только закончишь, отправь отчёт."),
+                ("Как в прошлый раз, нет никакой детализации.", "Как в прошлый раз, нет никакой детализации."),
+                ("Что-то здесь не так, нужно доработать", "Что-то здесь не так, нужно доработать."),
+                ("Я не знаю, будет ли он завтра.", "Я не знаю, будет ли он завтра."),
+                ("Вряд ли успеем до пятницы.", "Вряд ли успеем до пятницы."),
+                ("Ты, кстати, можешь просто бота просить отслеживать слоты.",
+                 "Ты, кстати, можешь просто бота просить отслеживать слоты."),
+                ("Можешь не торопиться, это не срочно.", "Можешь не торопиться, это не срочно."),
+                ("Сколько бы ни стоило, берём.", "Сколько бы ни стоило, берём."),
+                ("Что касается цен, их обновим завтра.", "Что касается цен, их обновим завтра."),
+                // Уже стоящие знаки не трогаются.
+                ("Ты придёшь завтра? Отлично!", "Ты придёшь завтра? Отлично!"),
+                ("Ну и дела…", "Ну и дела…"),
+            ]
+            var ok = 0
+            for (input, expected) in cases {
+                let got = PunctuationFixer.restoreQuestionMarks(input)
+                if got == expected { ok += 1 }
+                print("\(got == expected ? "PASS" : "FAIL")  \(got)\(got == expected ? "" : "\n      ожидалось: \(expected)")")
+            }
+            print("\nверно: \(ok)/\(cases.count)")
+            if idx + 1 < CommandLine.arguments.count, CommandLine.arguments[idx + 1] == "history" {
+                print("\n=== история: где шаг поставил бы «?» ===")
+                for r in HistoryStore.shared.recent(limit: 1000) {
+                    let fixed = PunctuationFixer.restoreQuestionMarks(r.finalText)
+                    let before = r.finalText.filter { $0 == "?" }.count, after = fixed.filter { $0 == "?" }.count
+                    if after > before { print("  \(fixed)") }
+                }
+            }
             exit(0)
         }
 
@@ -190,6 +292,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ("Проверь фрисовые шапки", "Проверь флисовые шапки", "фрисовые → флисовые"),
                 ("Отправь на ля моду сегодня", "Отправь на Lamoda сегодня", "ля моду → Lamoda"),
                 ("Посчитай себе с товара", "Посчитай себестоимость товара", "себе с → себестоимость"),
+                ("Если есть пожелание, какое-то хотелки", "Если есть пожелание и какие-то хотелки",
+                 "какое-то → и какие-то (без запятой)"),
                 ("Мне нужно подумать механизм как это сделать",
                  "Надо придумать способ реализации", "(переписывание — не одна пара)"),
             ]
@@ -241,7 +345,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let bad = [("боты", "бота"), ("задаче", "задачам"), ("листа", "к листу"),
                        ("упакуют", "пакуют"), ("обновить", "Обнови"), ("настроено", "настроен"),
                        ("поехала", "поехало"), ("кода", "когда"), ("себе", "себес"),
-                       ("сегодняшние", "сегодняшнего"), ("аппаратном", "платном")]
+                       ("сегодняшние", "сегодняшнего"), ("аппаратном", "платном"),
+                       ("какое-то", "и какие-то"), (", какое-то", "и какие-то")]
             let w = TextChangeWatcher.shared
             var ok = 0
             print("=== ДОЛЖНЫ учиться (ослышки) ===")
@@ -257,6 +362,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("  \(learn ? "УЧИМ!!" : "отсеян") «\(a)» → «\(b)»")
             }
             print("\nверно: \(ok)/\(good.count + bad.count)")
+            exit(0)
+        }
+
+        // Скрытый отладочный режим: `VoiceVoice --dict-sim` — что словарь правок делает
+        // с текстами из истории: точные замены и отдельно — добавленные нечётким сравнением.
+        if CommandLine.arguments.contains("--dict-sim") {
+            for r in HistoryStore.shared.recent(limit: 1000).reversed() {
+                let exact = CorrectionApplier.shared.apply(to: r.rawText, fuzzy: false)
+                let full = CorrectionApplier.shared.apply(to: r.rawText, fuzzy: true)
+                for s in exact.substitutions { print("ТОЧНО  «\(s.wrong)» → «\(s.right)»") }
+                for s in full.substitutions where s.fuzzy {
+                    let words = full.text.split(separator: " ")
+                    let pos = min(max(0, s.positionInOutput / 2), words.count)
+                    let ctx = words[max(0, pos - 3)..<min(words.count, pos + 3)].joined(separator: " ")
+                    print("НЕЧЁТКО по «\(s.wrong)» → «\(s.right)»   …\(ctx)…")
+                    print("        было: \(r.rawText.prefix(160))")
+                }
+            }
             exit(0)
         }
 
