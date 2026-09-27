@@ -196,7 +196,63 @@ final class TextInserter {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    // MARK: - Выделенный текст (быстрая правка)
+
+    /// Выделенный текст в активном поле. Сначала через службы доступности (без побочных
+    /// эффектов); если приложение их не даёт (MAX, Termius, браузеры) — через ⌘C с
+    /// возвратом прежнего буфера. nil — ничего не выделено.
+    func selectedText() async -> String? {
+        let front = NSWorkspace.shared.frontmostApplication
+        Self.prepareAccessibility(for: front)
+        var element = Self.copyFocusedElement()
+        if element == nil || Self.readValue(from: element!) == nil, let pid = front?.processIdentifier {
+            element = Self.findFocusedTextElement(pid: pid).field ?? element
+        }
+        if let element {
+            var sel: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &sel) == .success,
+               let s = sel as? String, !s.isEmpty {
+                return s
+            }
+        }
+        // ⌘C: если буфер не изменился — выделения нет.
+        let snapshot = ClipboardSnapshot.capture()
+        let before = NSPasteboard.general.changeCount
+        guard synthesizeCmdCViaCGEvent() else { return nil }
+        for _ in 0..<8 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            if NSPasteboard.general.changeCount != before { break }
+        }
+        guard NSPasteboard.general.changeCount != before else { return nil }
+        let copied = NSPasteboard.general.string(forType: .string)
+        snapshot.restore()
+        return (copied?.isEmpty ?? true) ? nil : copied
+    }
+
+    private func synthesizeCmdCViaCGEvent() -> Bool {
+        guard let src = CGEventSource(stateID: .hidSystemState) else { return false }
+        let cmdKey = CGKeyCode(kVK_Command), cKey = CGKeyCode(kVK_ANSI_C)
+        guard let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: cmdKey, keyDown: true),
+              let cDown = CGEvent(keyboardEventSource: src, virtualKey: cKey, keyDown: true),
+              let cUp = CGEvent(keyboardEventSource: src, virtualKey: cKey, keyDown: false),
+              let cmdUp = CGEvent(keyboardEventSource: src, virtualKey: cmdKey, keyDown: false)
+        else { return false }
+        cDown.flags = .maskCommand
+        cUp.flags = .maskCommand
+        let loc: CGEventTapLocation = .cghidEventTap
+        cmdDown.post(tap: loc); usleep(15_000)
+        cDown.post(tap: loc); usleep(15_000)
+        cUp.post(tap: loc); usleep(15_000)
+        cmdUp.post(tap: loc)
+        return true
+    }
+
+    /// Поле, куда вставка подтверждена последней (`.pasted`) — отдаётся слежению за
+    /// правками (TextChangeWatcher), которое само его найти не может у Electron.
+    private(set) var lastVerifiedField: AXUIElement?
+
     private func runPasteChain(text: String, bundleID: String, focusMayHaveMoved: Bool) async -> PasteOutcome {
+        lastVerifiedField = nil
         var focusedElement = Self.copyFocusedElement()
         let noFocusAtAll = focusedElement == nil
         var editability = Self.classifyFocus(focusedElement)
@@ -259,6 +315,7 @@ final class TextInserter {
             if Self.pasteLanded(element: focusedElement, pastedText: text, preValue: preValue) {
                 DebugLog.log("Paste: tier1 verified via AX — restoring previous clipboard")
                 await finalizeAfterPaste(savedClipboard: savedClipboard)
+                lastVerifiedField = focusedElement
                 return .pasted
             }
         } else {
@@ -294,6 +351,7 @@ final class TextInserter {
         if Self.pasteLanded(element: focusedElement, pastedText: text, preValue: preValue) {
             DebugLog.log("Paste: tier2 verified via AX — restoring clipboard")
             await finalizeAfterPaste(savedClipboard: savedClipboard)
+            lastVerifiedField = focusedElement
             return .pasted
         }
 
@@ -304,6 +362,7 @@ final class TextInserter {
         if Self.pasteLanded(element: focusedElement, pastedText: text, preValue: preValue) {
             DebugLog.log("Paste: tier2b verified via AX — restoring clipboard")
             await finalizeAfterPaste(savedClipboard: savedClipboard)
+            lastVerifiedField = focusedElement
             return .pasted
         }
 
@@ -313,6 +372,7 @@ final class TextInserter {
             DebugLog.log("Paste tier3 (AXUIElement): ok=\(axOk)")
             if axOk {
                 await finalizeAfterPaste(savedClipboard: savedClipboard)
+                lastVerifiedField = focusedElement
                 return .pasted
             }
         } else {

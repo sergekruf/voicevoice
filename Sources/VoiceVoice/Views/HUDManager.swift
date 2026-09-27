@@ -56,6 +56,12 @@ final class HUDManager {
 
     func hideResult() { resultPanel?.orderOut(nil) }
 
+    /// Итог быстрой правки — ответ на явное действие, поэтому и в тихом режиме.
+    func showQuickFixResult(wrong: String, right: String, learned: Bool) {
+        let view = QuickFixResultToast(wrong: wrong, right: right, learned: learned)
+        present(view: view, ref: &learnedPanel, size: NSSize(width: 520, height: learned ? 70 : 90), autohide: 4.0)
+    }
+
     /// Текст оказался в буфере обмена (поля нет, вставка не прошла или курсор мог уйти из
     /// поля). Обычный режим — полный HUD результата; тихий — короткая подсказка: это не
     /// уведомление «для красоты», без него текст выглядит пропавшим.

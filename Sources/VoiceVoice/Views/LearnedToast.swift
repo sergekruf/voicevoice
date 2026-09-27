@@ -66,3 +66,32 @@ struct LearnedToast: View {
         .padding(4)
     }
 }
+
+/// Итог быстрой правки (QuickFixService).
+struct QuickFixResultToast: View {
+    let wrong: String
+    let right: String
+    let learned: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: learned ? "book.closed.fill" : "checkmark.circle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(learned ? .green : .cyan)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("«\(wrong)» → «\(right)»")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                Text(learned ? "Заменено и добавлено в словарь"
+                             : "Заменено в тексте. В словарь не добавлено: «\(wrong)» — обычное слово, правило испортило бы другие фразы.")
+                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: 460, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.85)))
+        .padding(4)
+    }
+}

@@ -132,6 +132,7 @@ final class AppController: ObservableObject {
         // Возврат системного входа, если его захватила BT-гарнитура (по настройке).
         SystemInputGuard.shared.applySetting()
         startDictionaryCheckWatch()
+        QuickFixService.shared.start()
         Self.trashRemovedFeatureModels()
     }
 
@@ -672,7 +673,8 @@ final class AppController: ObservableObject {
                         TextChangeWatcher.shared.startWatching(
                             pastedText: appliedText,
                             frontBundleID: frontBundle,
-                            appliedSubstitutions: self.lastSubstitutions
+                            appliedSubstitutions: self.lastSubstitutions,
+                            field: self.inserter.lastVerifiedField
                         )
                     }
                 }

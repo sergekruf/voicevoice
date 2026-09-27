@@ -44,6 +44,35 @@ enum STTEngine: String, CaseIterable, Identifiable {
     }
 }
 
+/// Клавиша быстрой правки: одиночное нажатие (без других клавиш) при выделенном
+/// слове открывает окошко «как правильно» — замена в поле + пара в словарь.
+enum QuickFixKey: String, CaseIterable, Identifiable {
+    case rightCommand, leftControl, off
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .rightCommand: return "правый ⌘"
+        case .leftControl: return "левый ⌃"
+        case .off: return "выключено"
+        }
+    }
+    /// keyCode в событии flagsChanged и флаг модификатора.
+    var keyCode: Int? {
+        switch self {
+        case .rightCommand: return 54
+        case .leftControl: return 59
+        case .off: return nil
+        }
+    }
+    var flag: NSEvent.ModifierFlags {
+        switch self {
+        case .rightCommand: return .command
+        case .leftControl, .off: return .control
+        }
+    }
+}
+
 /// Как часто проверять словарь правок автоматически.
 enum DictionaryCheckSchedule: String, CaseIterable, Identifiable {
     case off, daily, weekly
@@ -82,6 +111,9 @@ final class AppSettings: ObservableObject {
     /// записи голоса (~50 МБ в день) не должны копиться у пользователей без спроса.
     /// Включить: `defaults write com.sergekruf.voicevoice keepDictationAudio -bool true`.
     @AppStorage("keepDictationAudio") var keepDictationAudio: Bool = false
+    /// Быстрая правка выделенного слова (QuickFixService).
+    @AppStorage("quickFixKey") var quickFixKeyRaw: String = QuickFixKey.rightCommand.rawValue
+    var quickFixKey: QuickFixKey { QuickFixKey(rawValue: quickFixKeyRaw) ?? .rightCommand }
     /// Maximum allowed Levenshtein-distance / max-length ratio for a fuzzy match (0..1).
     /// 15%: одна буква в словах до 10 букв, две — в более длинных.
     @AppStorage("fuzzyThreshold") var fuzzyThreshold: Double = 0.15

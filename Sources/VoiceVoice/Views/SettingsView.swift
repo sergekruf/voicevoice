@@ -167,6 +167,15 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Picker(selection: $settings.quickFixKeyRaw) {
+                    ForEach(QuickFixKey.allCases) { k in Text(k.displayName).tag(k.rawValue) }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Быстрая правка")
+                        HelpHint(text: "Выделите неправильно распознанное слово прямо в поле и один раз нажмите эту клавишу (без других клавиш) — появится окошко «Как правильно?». Enter заменит слово в тексте и добавит пару в словарь правок, чтобы в следующий раз оно распознавалось верно. Работает в любом приложении, в том числе там, где автообучение не видит поле (MAX, Termius, ChatGPT, браузеры). Если ничего не выделено, нажатие ничего не делает. Обычные русские слова в словарь не добавляются — такое правило портило бы другие фразы.")
+                    }
+                }
+                .onChange(of: settings.quickFixKeyRaw) { _, _ in QuickFixService.shared.start() }
                 Toggle(isOn: $settings.quietMode) {
                     HStack(spacing: 4) {
                         Text("Тихий режим — отключить все уведомления")

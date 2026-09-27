@@ -45,10 +45,10 @@ final class TextChangeWatcher {
     /// capture mid-typing intermediate junk like "кодоm" while the user is still editing.
     private var pendingChanges: Bool = false
     private var stablePollCount: Int = 0
-    /// Number of consecutive unchanged polls before committing. With pollInterval = 1.0 this
-    /// means ~2 seconds of inactivity before the diff is captured — enough for the user to
+    /// Number of consecutive unchanged polls before committing. With pollInterval = 0.3 this
+    /// means ~1.2 seconds of inactivity before the diff is captured — enough for the user to
     /// type a multi-letter correction, but not so long it feels sluggish.
-    private let stableThresholdPolls: Int = 2
+    private let stableThresholdPolls: Int = 4
     private var pollTimer: Timer?
     private var inactivityDeadline: Date = .distantPast
     private var workspaceObserver: NSObjectProtocol?
@@ -65,11 +65,18 @@ final class TextChangeWatcher {
         "com.github.Electron",
     ]
 
-    private let pollInterval: TimeInterval = 1.0
+    /// Опрос раз в 0,3 с (было 1 с): правку, сделанную прямо перед отправкой сообщения,
+    /// раньше выбрасывали как недописанную — по журналу 364 таких против 209 выученных.
+    /// Теперь при отправке правка засчитывается, если после неё прошло хотя бы 0,3 с.
+    private let pollInterval: TimeInterval = 0.3
     private let totalTimeout: TimeInterval = 300
 
+    /// - field: поле, в которое вставка только что подтверждена (TextInserter). У
+    ///   Electron-приложений (Claude, VS Code) запрос «где фокус» пуст, но само поле
+    ///   найдено и прочитано при вставке — следим за ним напрямую.
     func startWatching(pastedText: String, frontBundleID: String?,
-                       appliedSubstitutions: [AppliedSubstitution] = []) {
+                       appliedSubstitutions: [AppliedSubstitution] = [],
+                       field: AXUIElement? = nil) {
         stopWatching()
 
         if !AppSettings.shared.autoLearnCorrections {
@@ -82,14 +89,19 @@ final class TextChangeWatcher {
             return
         }
 
-        let systemWide = AXUIElementCreateSystemWide()
-        var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let focusedRef = focused else {
-            DebugLog.log("Watcher: cannot fetch focused element — app doesn't expose AX")
-            return
+        var element: AXUIElement
+        if let field, Self.readValue(from: field) != nil {
+            element = field
+        } else {
+            let systemWide = AXUIElementCreateSystemWide()
+            var focused: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+                  let focusedRef = focused else {
+                DebugLog.log("Watcher: cannot fetch focused element — app doesn't expose AX")
+                return
+            }
+            element = focusedRef as! AXUIElement
         }
-        var element = focusedRef as! AXUIElement
 
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success, pid != 0 else { return }
@@ -141,7 +153,7 @@ final class TextChangeWatcher {
 
     func stopWatching() {
         // Flush any pending edit before we tear the session down — but ONLY if the
-        // value survived at least one stable poll (~1 s idle). Otherwise the user hit
+        // value survived at least one stable poll (~0.3 s idle). Otherwise the user hit
         // Enter / switched apps MID-TYPING, and we'd learn a truncated word
         // («кодом → кодо») — the stability window exists precisely against that.
         if pendingChanges, stablePollCount >= 1, !lastEdited.isEmpty, !originalPasted.isEmpty {
