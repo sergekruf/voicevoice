@@ -73,6 +73,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Скрытый отладочный режим: `VoiceVoice --handsfree-test a.wav …` — свободная
+        // запись без микрофона: запись «идёт» в 8× реальном времени, куски распознаются
+        // по ходу, после «остановки» сравнивается с распознаванием целиком.
+        if let idx = CommandLine.arguments.firstIndex(of: "--handsfree-test"),
+           idx + 1 < CommandLine.arguments.count {
+            let paths = Array(CommandLine.arguments[(idx + 1)...])
+            Task { @MainActor in
+                let giga = GigaAMTranscriber.shared
+                giga.ensureLoaded()
+                while giga.state != .ready { try? await Task.sleep(nanoseconds: 200_000_000) }
+                for path in paths {
+                    guard let audio = try? AudioFileDecoder.decode(url: URL(fileURLWithPath: path)) else { continue }
+                    let batch = await giga.transcribe(audio: audio)
+                    let speed = 8.0
+                    let t0 = Date()
+                    giga.startPreview(samples: {
+                        let n = Int(Date().timeIntervalSince(t0) * speed * AudioRecorder.targetSampleRate)
+                        return Array(audio.prefix(n))
+                    })
+                    giga.setPreciseCommits(true)
+                    let duration = Double(audio.count) / AudioRecorder.targetSampleRate
+                    try? await Task.sleep(nanoseconds: UInt64(duration / speed * 1_000_000_000) + 300_000_000)
+                    let t1 = Date()
+                    let incremental = await giga.transcribe(audio: audio)
+                    let ms = Int(Date().timeIntervalSince(t1) * 1000)
+                    print("HANDSFREE-TEST \((path as NSString).lastPathComponent) \(Int(duration)) с: после стопа \(ms) мс, совпадает с целиком: \(incremental == batch)")
+                    if incremental != batch { print("  целиком: \(batch)\n  по ходу: \(incremental)") }
+                }
+                exit(0)
+            }
+            return
+        }
+
         // Скрытый отладочный режим: `VoiceVoice --seam-test` — сверка стыка аудио-кусков
         // с контекстным прогоном (Transcriber.reconcileSeam) и перенос «?».
         if CommandLine.arguments.contains("--seam-test") {

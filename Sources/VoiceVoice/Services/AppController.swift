@@ -48,6 +48,25 @@ final class AppController: ObservableObject {
     private var pressFrontPID: pid_t?
     private var clickedDuringRecording = false
     private var clickMonitor: Any?
+
+    // ── Свободная запись: двойное нажатие клавиши — запись без удержания ─────────
+    // Первое короткое нажатие уже пишет звук; если за `doubleTapWindow` пришло второе —
+    // запись продолжается без удержания, пока клавиша не будет нажата ещё раз. Одиночное
+    // короткое нажатие (случайное) тихо отменяется. Удержание работает как раньше.
+    private enum TapPhase { case none, awaitingSecondTap, handsFree }
+    private var tapPhase: TapPhase = .none
+    private var forceClipboardOnly = false
+    private var pressStartedAt: Date?
+    private var ignoreNextRelease = false
+    private var secondTapWork: DispatchWorkItem?
+    private var handsFreeLimitWork: DispatchWorkItem?
+    private var lastEscAt: Date?
+    /// Когда началась свободная запись (nil — обычный режим). Для индикатора.
+    @Published private(set) var handsFreeStartedAt: Date?
+    private static let tapMaxHold: TimeInterval = 0.3
+    private static let doubleTapWindow: TimeInterval = 0.4
+    /// Защита от забытой записи: дальше — стоп, текст в буфер.
+    static let handsFreeLimit: TimeInterval = 30 * 60
     private var warmIdleTimer: Timer?
 
     private init() {
@@ -268,7 +287,24 @@ final class AppController: ObservableObject {
     // MARK: - Recording flow
 
     private func handlePress() {
-        DebugLog.log("App: handlePress entered, state=\(state)")
+        DebugLog.log("App: handlePress entered, state=\(state), tapPhase=\(tapPhase)")
+        switch tapPhase {
+        case .awaitingSecondTap:
+            startHandsFree()
+            return
+        case .handsFree:
+            // Нажатие в свободной записи — стоп и вставка туда, где сейчас курсор.
+            // Клики до этого момента — осознанный переход в нужное поле, не «уход».
+            ignoreNextRelease = true
+            clickedDuringRecording = false
+            pressFrontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            endHandsFreeState()
+            DebugLog.log("App: свободная запись — стоп по нажатию")
+            finishRecording()
+            return
+        case .none:
+            break
+        }
         // .error must not be a dead end: the next press simply retries (the cause —
         // e.g. an unplugged mic — may be gone by now). .complete is a purely
         // cosmetic 0.5s tail — a press during it used to swallow the entire next
@@ -292,6 +328,7 @@ final class AppController: ObservableObject {
         }
         do {
             try recorder.start()
+            pressStartedAt = Date()
             state = .recording(level: 0)
             HUDManager.shared.showRecording()
             installEscMonitor()
@@ -351,16 +388,31 @@ final class AppController: ObservableObject {
             || (pressFrontPID != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier != pressFrontPID)
     }
 
+    /// В свободной записи вы работаете за компьютером, и одиночный Esc (закрыть окно,
+    /// отменить действие) не должен уничтожать длинную запись — нужен двойной Esc.
+    private func handleEsc() {
+        if tapPhase == .handsFree {
+            if let last = lastEscAt, Date().timeIntervalSince(last) < 0.8 {
+                lastEscAt = nil
+                cancelDictation(reason: "двойной Esc")
+            } else {
+                lastEscAt = Date()
+            }
+            return
+        }
+        cancelDictation()
+    }
+
     private func installEscMonitor() {
         removeEscMonitor()
         escMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if Int(event.keyCode) == AppController.escKeyCode {
-                Task { @MainActor in self?.cancelDictation() }
+                Task { @MainActor in self?.handleEsc() }
             }
         }
         escMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if Int(event.keyCode) == AppController.escKeyCode {
-                self?.cancelDictation()
+                self?.handleEsc()
                 return nil   // consume so our own UI doesn't also react
             }
             return event
@@ -378,10 +430,14 @@ final class AppController: ObservableObject {
     /// (drops the audio) or while transcribing (drops the in-flight decode — matters
     /// when the model is still downloading and the app would otherwise hang in
     /// .transcribing with no way out).
-    func cancelDictation() {
+    func cancelDictation(reason: String = "Esc") {
+        secondTapWork?.cancel()
+        secondTapWork = nil
+        endHandsFreeState()
+        ignoreNextRelease = false
         switch state {
         case .recording:
-            DebugLog.log("App: dictation cancelled via Esc")
+            DebugLog.log("App: dictation cancelled (\(reason))")
             SystemAudioMuter.shared.restore()
             stopFocusTracking()
             recorder.cancel()
@@ -403,10 +459,69 @@ final class AppController: ObservableObject {
     }
 
     private func handleRelease() {
+        if ignoreNextRelease {
+            ignoreNextRelease = false
+            return
+        }
         guard case .recording = state else {
             DebugLog.log("App: handleRelease bailing, state was \(state)")
             return
         }
+        if tapPhase == .handsFree { return }
+        // Короткое нажатие (не удержание) — возможно, первое из двойного. Запись идёт
+        // дальше; если второе нажатие не придёт, это случайный тап — тихо отменяем.
+        // У Caps Lock нажатия и так переключатель — там двойного нажатия нет.
+        if settings.hotkey != .capsLock, let t0 = pressStartedAt,
+           Date().timeIntervalSince(t0) < Self.tapMaxHold {
+            tapPhase = .awaitingSecondTap
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.tapPhase == .awaitingSecondTap else { return }
+                self.tapPhase = .none
+                DebugLog.log("App: одиночное короткое нажатие — запись отменена")
+                self.cancelDictation(reason: "короткое нажатие")
+            }
+            secondTapWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.doubleTapWindow, execute: work)
+            return
+        }
+        finishRecording()
+    }
+
+    // MARK: - Свободная запись
+
+    private func startHandsFree() {
+        secondTapWork?.cancel()
+        secondTapWork = nil
+        tapPhase = .handsFree
+        ignoreNextRelease = true
+        handsFreeStartedAt = Date()
+        DebugLog.log("App: свободная запись — старт (двойное нажатие)")
+        // Готовые куски распознаются точным режимом прямо во время записи — после
+        // остановки остаётся только хвост.
+        if settings.sttEngine == .gigaAM { GigaAMTranscriber.shared.setPreciseCommits(true) }
+        let limit = DispatchWorkItem { [weak self] in
+            guard let self, self.tapPhase == .handsFree else { return }
+            DebugLog.log("App: свободная запись — лимит \(Int(Self.handsFreeLimit / 60)) мин, стоп, текст в буфер")
+            self.endHandsFreeState()
+            self.finishRecording(clipboardOnly: true)
+        }
+        handsFreeLimitWork = limit
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.handsFreeLimit, execute: limit)
+    }
+
+    private func endHandsFreeState() {
+        tapPhase = .none
+        handsFreeStartedAt = nil
+        handsFreeLimitWork?.cancel()
+        handsFreeLimitWork = nil
+    }
+
+    /// Остановить запись и отдать звук на распознавание (бывшее тело handleRelease).
+    /// `clipboardOnly` — не вставлять, а положить текст в буфер (стоп по лимиту: где
+    /// сейчас курсор, неизвестно).
+    private func finishRecording(clipboardOnly: Bool = false) {
+        guard case .recording = state else { return }
+        forceClipboardOnly = clipboardOnly
         // Esc monitors intentionally stay installed: Esc can also cancel the
         // transcription phase (see cancelDictation). Removed when finalize runs.
         SystemAudioMuter.shared.restore()   // звук возвращаем сразу, не дожидаясь распознавания
@@ -524,9 +639,17 @@ final class AppController: ObservableObject {
             let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
             let focusMoved = focusMayHaveMoved
             if focusMoved { DebugLog.log("App: за время диктовки был клик или смена приложения") }
+            let clipboardOnly = forceClipboardOnly
+            forceClipboardOnly = false
             Task { [weak self] in
                 guard let self else { return }
-                let outcome = await self.inserter.paste(appliedText, focusMayHaveMoved: focusMoved)
+                let outcome: PasteOutcome
+                if clipboardOnly {
+                    self.inserter.copyOnly(appliedText)
+                    outcome = .clipboardOnly
+                } else {
+                    outcome = await self.inserter.paste(appliedText, focusMayHaveMoved: focusMoved)
+                }
                 await MainActor.run {
                     self.lastPasteOutcome = outcome
                     // Verified paste (`.pasted`) needs no HUD — the user sees the text in the field

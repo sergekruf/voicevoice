@@ -9,7 +9,7 @@ struct RecordingOverlay: View {
     @ObservedObject private var parakeet = ParakeetTranscriber.shared
     @ObservedObject private var gigaam = GigaAMTranscriber.shared
 
-    static let panelSize = NSSize(width: 640, height: 240)
+    static let panelSize = NSSize(width: 640, height: 280)
 
     var body: some View {
         VStack(spacing: 10) {
@@ -27,6 +27,9 @@ struct RecordingOverlay: View {
                 }
             }
             .frame(width: 120, height: 120)
+            if case .recording = controller.state, let started = controller.handsFreeStartedAt {
+                HandsFreeCaption(startedAt: started)
+            }
         }
         .frame(width: Self.panelSize.width, height: Self.panelSize.height, alignment: .bottom)
         .background(Color.clear)
@@ -50,6 +53,24 @@ struct RecordingOverlay: View {
     private var levelValue: Float {
         if case .recording(let l) = controller.state { return l }
         return 0
+    }
+}
+
+/// Свободная запись: сколько длится и как её закончить — иначе легко забыть, что
+/// микрофон пишет.
+private struct HandsFreeCaption: View {
+    let startedAt: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let seconds = max(0, Int(context.date.timeIntervalSince(startedAt)))
+            Text("Свободная запись · \(seconds / 60):\(String(format: "%02d", seconds % 60))  ·  Fn — вставить  ·  Esc Esc — отмена")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.95))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.black.opacity(0.78)))
+        }
     }
 }
 

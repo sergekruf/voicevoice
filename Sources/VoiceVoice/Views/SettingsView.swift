@@ -151,7 +151,20 @@ struct SettingsView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Text("Hotkey")
-                        HelpHint(text: "Клавиша диктовки. Fn и Right Option работают удержанием (зажал — говоришь — отпустил). Caps Lock — переключателем: нажал — запись пошла, нажал ещё раз — стоп (macOS не сообщает отпускание Caps Lock, поэтому удержание для него невозможно; сам замок при этом не включается).")
+                        HelpHint(text: "Клавиша диктовки. Fn и Right Option работают удержанием (зажал — говоришь — отпустил) или свободной записью: двойное нажатие — запись идёт без удержания, можно работать за компьютером; ещё одно нажатие — стоп, текст вставляется туда, где сейчас курсор; двойной Esc — отмена. Caps Lock — переключателем: нажал — запись пошла, нажал ещё раз — стоп (macOS не сообщает отпускание Caps Lock, поэтому удержание для него невозможно; сам замок при этом не включается).")
+                    }
+                }
+                if settings.hotkey == .fn, let action = Self.systemFnKeyAction {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("⚠️ Короткое нажатие 🌐/Fn у вас в macOS \(action). Для свободной записи (двойное нажатие Fn) это мешает — при каждом нажатии будет открываться системное окно. В настройках клавиатуры выберите «Нажатие клавиши 🌐» → «Ничего не делать».")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Открыть настройки клавиатуры") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
                     }
                 }
                 Toggle(isOn: $settings.quietMode) {
@@ -289,6 +302,17 @@ struct SettingsView: View {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         return "\(v) (build \(b))"
+    }
+
+    /// Что macOS делает по короткому нажатию 🌐/Fn (Клавиатура → «Нажатие клавиши 🌐»).
+    /// nil — «Ничего не делать», двойному нажатию Fn не мешает.
+    static var systemFnKeyAction: String? {
+        switch UserDefaults(suiteName: "com.apple.HIToolbox")?.integer(forKey: "AppleFnUsageType") ?? 0 {
+        case 1: return "переключает раскладку"
+        case 2: return "открывает панель эмодзи"
+        case 3: return "запускает системную диктовку"
+        default: return nil
+        }
     }
 
     private var modelStatus: String {

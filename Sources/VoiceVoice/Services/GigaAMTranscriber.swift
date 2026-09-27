@@ -47,6 +47,12 @@ final class GigaAMTranscriber: ObservableObject {
     private var previewTask: Task<Void, Never>?
     private var previewPieces: [String] = []
     private var previewCommittedOffset = 0
+    /// Свободная запись: готовые куски во время записи распознаются точным режимом и
+    /// сохраняются здесь, а `transcribe` после остановки распознаёт только хвост.
+    private var preciseCommits = false
+    private var precommitted: [(chunk: Transcriber.AudioChunk, decoded: (text: String, sentenceEnds: [Int])?)] = []
+    /// Стыки между сохранёнными кусками, уже перепроверенные с контекстом во время записи.
+    private var precheckedSeams: [Int: (window: Range<Int>, text: String)] = [:]
 
     private init() {}
 
@@ -255,8 +261,38 @@ final class GigaAMTranscriber: ObservableObject {
 
     /// Транскрибирует mono 16 кГц Float-сэмплы. Куски ≤14 с (тот же chunkBySilence,
     /// что у других движков) → паддинг до 15-секундного окна → greedy-CTC.
+    /// Перепроверить стык перед только что сохранённым куском, пока запись идёт. Окно
+    /// берётся тем же `seamWindow`; результат годится, только если после стыка уже
+    /// записано 6 с — тогда окно совпадёт с тем, что посчитает `transcribe`.
+    private func precheckLastSeam(snapshot: [Float], models: RNNTModels) async {
+        let k = precommitted.count - 1
+        guard k >= 1, let left = precommitted[k - 1].decoded, let right = precommitted[k].decoded,
+              Self.seamNeedsCheck(left: left.text, right: right.text) else { return }
+        let chunkStart = precommitted[..<(k - 1)].reduce(0) { $0 + $1.chunk.samples.count }
+        let length = precommitted[k - 1].chunk.samples.count
+        let sr = Int(AudioRecorder.targetSampleRate)
+        guard snapshot.count >= chunkStart + length + 6 * sr else { return }
+        let window = seamWindow(audioCount: snapshot.count, chunkStart: chunkStart, length: length, ends: left.sentenceEnds)
+        if let text = try? await decode(Array(snapshot[window]), models: models) {
+            precheckedSeams[k - 1] = (window, text)
+        }
+    }
+
+    /// Сохранённые куски годятся, только если они покрывают запись с самого начала
+    /// (точный режим включили до первого коммита черновика).
+    private var precommittedCoversPrefix: Bool {
+        precommitted.reduce(0) { $0 + $1.chunk.samples.count } == previewCommittedOffset
+    }
+
     func transcribe(audio: [Float]) async -> String {
         await stopPreview()
+        // Свободная запись: куски, распознанные во время записи, + хвост.
+        let reuse = precommitted.isEmpty ? [] : precommitted
+        let reusedSamples = reuse.reduce(0) { $0 + $1.chunk.samples.count }
+        let seamCache = precheckedSeams
+        precommitted = []
+        precheckedSeams = [:]
+        preciseCommits = false
         ensureLoaded()
         while true {
             if Task.isCancelled { return "" }
@@ -276,10 +312,18 @@ final class GigaAMTranscriber: ObservableObject {
         }
 
         let start = Date()
-        let chunks = Transcriber.chunkBySilence(audio, windowSeconds: windowSamples / Int(AudioRecorder.targetSampleRate))
+        let windowSeconds = windowSamples / Int(AudioRecorder.targetSampleRate)
+        let canReuse = !reuse.isEmpty && reusedSamples < audio.count
+        let tailChunks = Transcriber.chunkBySilence(canReuse ? Array(audio[reusedSamples...]) : audio,
+                                                     windowSeconds: windowSeconds)
+        let chunks = (canReuse ? reuse.map(\.chunk) : []) + tailChunks
         var decoded: [(text: String, sentenceEnds: [Int])?] = Array(repeating: nil, count: chunks.count)
+        if canReuse {
+            for (i, r) in reuse.enumerated() { decoded[i] = r.decoded }
+            DebugLog.log("GigaAM: свободная запись — \(reuse.count) кусков уже распознаны во время записи, осталось \(tailChunks.count)")
+        }
         var failedChunks = 0
-        for (i, chunk) in chunks.enumerated() {
+        for (i, chunk) in chunks.enumerated() where !(canReuse && i < reuse.count) {
             if Task.isCancelled { break }
             do {
                 let d = try await decodeDetailed(chunk.samples, models: models, precise: true)
@@ -299,7 +343,8 @@ final class GigaAMTranscriber: ObservableObject {
                 DebugLog.log("GigaAM: chunk \(i + 1)/\(chunks.count) FAILED — \(error.localizedDescription); keeping the rest")
             }
         }
-        let items = await reconcileSeams(audio: audio, chunks: chunks, decoded: decoded, models: models)
+        let items = await reconcileSeams(audio: audio, chunks: chunks, decoded: decoded, models: models,
+                                         cachedContexts: canReuse ? seamCache : [:])
         lastProcessingMs = Int(Date().timeIntervalSince(start) * 1000)
         let cleaned = Transcriber.cleanup(Transcriber.joinChunkTexts(items))
         DebugLog.log("GigaAM: done in \(lastProcessingMs)ms, chunks=\(chunks.count), failed=\(failedChunks), len=\(cleaned.count), cleaned=\(cleaned.prefix(80))")
@@ -314,10 +359,30 @@ final class GigaAMTranscriber: ObservableObject {
     /// этого прогона. Окно начинается с начала последнего предложения левого куска:
     /// с середины фразы движок недоставляет знаки и терял настоящий «?» («…к десяти
     /// утра? Если нет…»). Цена — один прогон (~0,1 с) на стык со знаком.
+    /// Окно повторного распознавания стыка после куска: от начала его последнего
+    /// предложения до реза + 6 с, не длиннее окна модели.
+    private func seamWindow(audioCount: Int, chunkStart: Int, length: Int, ends: [Int]) -> Range<Int> {
+        let sr = Int(AudioRecorder.targetSampleRate)
+        // Знаки в последние 1,5 с куска — это и есть проверяемый стык.
+        let sentenceStart = ends.last(where: { $0 < length - 3 * sr / 2 }) ?? 0
+        let seam = chunkStart + length
+        let maxWindow = windowSamples - sr
+        var lo = chunkStart + sentenceStart
+        var hi = min(audioCount, seam + 6 * sr)
+        if hi - lo > maxWindow { hi = max(min(audioCount, seam + 3 * sr), lo + maxWindow) }
+        if hi - lo > maxWindow { lo = hi - maxWindow }
+        return lo..<hi
+    }
+
+    private static func seamNeedsCheck(left: String, right: String) -> Bool {
+        Transcriber.endsWithSentenceTerminator(left)
+            || right.first(where: { $0.isLetter })?.isUppercase == true
+    }
+
     private func reconcileSeams(audio: [Float], chunks: [Transcriber.AudioChunk],
                                 decoded: [(text: String, sentenceEnds: [Int])?],
-                                models: RNNTModels) async -> [(text: String, realPauseAfter: Bool)] {
-        let sr = Int(AudioRecorder.targetSampleRate)
+                                models: RNNTModels,
+                                cachedContexts: [Int: (window: Range<Int>, text: String)] = [:]) async -> [(text: String, realPauseAfter: Bool)] {
         var texts = decoded.map { $0?.text }
         var pauses = chunks.map(\.realPauseAfter)
         var carryQuestion = false
@@ -336,18 +401,16 @@ final class GigaAMTranscriber: ObservableObject {
             // декодер пишет так начало любого окна («как | Другие разработчики», «дело |
             // Прокачать»). Имя это или артефакт, решает тот же контекстный прогон.
             let leftTerminated = Transcriber.endsWithSentenceTerminator(left)
-            let rightCapitalized = right.first(where: { $0.isLetter })?.isUppercase == true
-            guard leftTerminated || rightCapitalized else { continue }
-            let length = chunks[i].samples.count
-            // Знаки в последние 1,5 с куска — это и есть проверяемый стык.
-            let sentenceStart = ends.last(where: { $0 < length - 3 * sr / 2 }) ?? 0
-            let seam = chunkStart + length
-            let maxWindow = windowSamples - sr
-            var lo = chunkStart + sentenceStart
-            var hi = min(audio.count, seam + 6 * sr)
-            if hi - lo > maxWindow { hi = max(min(audio.count, seam + 3 * sr), lo + maxWindow) }
-            if hi - lo > maxWindow { lo = hi - maxWindow }
-            guard let context = try? await decode(Array(audio[lo..<hi]), models: models) else { continue }
+            guard Self.seamNeedsCheck(left: left, right: right) else { continue }
+            let window = seamWindow(audioCount: audio.count, chunkStart: chunkStart,
+                                    length: chunks[i].samples.count, ends: ends)
+            let context: String
+            if let cached = cachedContexts[i], cached.window == window {
+                context = cached.text   // проверен во время свободной записи
+            } else {
+                guard let c = try? await decode(Array(audio[window]), models: models) else { continue }
+                context = c
+            }
             let seamText = "«…\(left.split(separator: " ").suffix(2).joined(separator: " ")) | "
                 + "\(right.split(separator: " ").prefix(2).joined(separator: " "))…»"
             switch Transcriber.reconcileSeam(left: left, right: right, context: context) {
@@ -733,8 +796,17 @@ final class GigaAMTranscriber: ObservableObject {
         previewTask?.cancel()
         previewPieces = []
         previewCommittedOffset = 0
+        preciseCommits = false
+        precommitted = []
+        precheckedSeams = [:]
         livePreviewText = ""
         previewTask = Task { [weak self] in await self?.previewLoop(samples: samples) }
+    }
+
+    /// Включить распознавание готовых кусков точным режимом во время записи (свободная
+    /// запись). Уже закоммиченные черновики не годятся — их переиспользовать нельзя.
+    func setPreciseCommits(_ on: Bool) {
+        preciseCommits = on
     }
 
     func stopPreview() async {
@@ -758,7 +830,15 @@ final class GigaAMTranscriber: ObservableObject {
             guard !chunks.isEmpty else { continue }
             for ch in chunks.dropLast() {
                 if Task.isCancelled { return }
-                let t = (try? await decode(ch.samples, models: models)) ?? ""
+                let t: String
+                if preciseCommits && precommittedCoversPrefix {
+                    let d = try? await decodeDetailed(ch.samples, models: models, precise: true)
+                    t = d?.text ?? ""
+                    precommitted.append((ch, (d?.text.isEmpty ?? true) ? nil : d))
+                    await precheckLastSeam(snapshot: snap, models: models)
+                } else {
+                    t = (try? await decode(ch.samples, models: models)) ?? ""
+                }
                 if !t.isEmpty { previewPieces.append(t) }
                 previewCommittedOffset += ch.samples.count
             }
