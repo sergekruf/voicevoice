@@ -113,6 +113,9 @@ final class TextInserter {
         let element = AXUIElementCreateApplication(app.processIdentifier)
         let r = AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         DebugLog.log("Paste: AXManualAccessibility для \(app.bundleIdentifier ?? "?") → \(r == .success ? "включено" : "не поддерживается")")
+        // Safari строит дерево страницы лениво, по первому обращению: обходим окно уже
+        // сейчас (начало диктовки), чтобы к вставке поле было видно.
+        _ = findFocusedTextElement(pid: app.processIdentifier)
     }
 
     /// Прямой запрос «где фокус» у Electron-приложений пуст даже с деревом доступности,
@@ -120,35 +123,45 @@ final class TextInserter {
     /// ~450 узлов, ~30 мс) с ограничением по числу узлов и времени.
     /// `windowHasFields` — в окне видны текстовые поля (дерево доступности открыто), но
     /// ни одно не в фокусе: курсор точно не в поле, даже без статистики по приложению.
-    private static func findFocusedTextElement(pid: pid_t) -> (field: AXUIElement?, windowHasFields: Bool) {
+    /// `webContentHidden` — в окне есть веб-страница, но полей в ней не видно: Safari
+    /// (WebKit) строит дерево страницы лениво, после первого обращения, — поля окна вне
+    /// страницы (адресная строка) тогда ничего не говорят о курсоре.
+    private static func findFocusedTextElement(pid: pid_t) -> (field: AXUIElement?, windowHasFields: Bool, webContentHidden: Bool) {
         let app = AXUIElementCreateApplication(pid)
         var winRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
-              let win = winRef else { return (nil, false) }
+              let win = winRef else { return (nil, false, false) }
         let textRoles: Set<String> = [kAXTextFieldRole as String, kAXTextAreaRole as String,
                                       kAXComboBoxRole as String, "AXSearchField"]
         let deadline = Date().addingTimeInterval(0.15)
         var visited = 0
         var sawField = false
+        var sawWebArea = false
+        var sawFieldInWebArea = false
         func attr(_ e: AXUIElement, _ a: String) -> CFTypeRef? {
             var v: CFTypeRef?
             return AXUIElementCopyAttributeValue(e, a as CFString, &v) == .success ? v : nil
         }
-        func search(_ e: AXUIElement, depth: Int) -> AXUIElement? {
+        func search(_ e: AXUIElement, depth: Int, inWebArea: Bool) -> AXUIElement? {
             visited += 1
             if visited > 3000 || depth > 80 || Date() > deadline { return nil }
-            if let role = attr(e, kAXRoleAttribute as String) as? String, textRoles.contains(role) {
+            let role = attr(e, kAXRoleAttribute as String) as? String
+            if let role, textRoles.contains(role) {
                 sawField = true
+                if inWebArea { sawFieldInWebArea = true }
                 if (attr(e, kAXFocusedAttribute as String) as? Bool) == true { return e }
             }
+            let isWebArea = role == "AXWebArea"
+            if isWebArea { sawWebArea = true }
             for child in (attr(e, kAXChildrenAttribute as String) as? [AXUIElement]) ?? [] {
-                if let found = search(child, depth: depth + 1) { return found }
+                if let found = search(child, depth: depth + 1, inWebArea: inWebArea || isWebArea) { return found }
             }
             return nil
         }
-        let found = search(win as! AXUIElement, depth: 0)
-        DebugLog.log("Paste: обход окна — \(visited) узлов, поле в фокусе: \(found != nil), поля в окне: \(sawField)")
-        return (found, sawField)
+        let found = search(win as! AXUIElement, depth: 0, inWebArea: false)
+        let webContentHidden = found == nil && sawWebArea && !sawFieldInWebArea
+        DebugLog.log("Paste: обход окна — \(visited) узлов, поле в фокусе: \(found != nil), поля в окне: \(sawField)\(webContentHidden ? ", страница закрыта" : "")")
+        return (found, sawField, webContentHidden)
     }
 
     /// Надёжно ли приложение показывает своё поле ввода. Считаем по истории: если почти
@@ -321,9 +334,17 @@ final class TextInserter {
         var editability = Self.classifyFocus(focusedElement)
         let hidesFields = Self.hidesFields(NSWorkspace.shared.frontmostApplication)
         var windowHasFields = false
+        var webContentHidden = false
         if editability == .axUnreadable, let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
-            let found = Self.findFocusedTextElement(pid: pid)
+            var found = Self.findFocusedTextElement(pid: pid)
+            if found.webContentHidden, !hidesFields {
+                // Первое обращение запустило построение дерева страницы — даём ему время.
+                // (Chromium-браузеры страницу часто не открывают вовсе — там не ждём.)
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                found = Self.findFocusedTextElement(pid: pid)
+            }
             windowHasFields = found.windowHasFields
+            webContentHidden = found.webContentHidden
             if let field = found.field {
                 focusedElement = field
                 editability = .editable
@@ -334,14 +355,16 @@ final class TextInserter {
         }
         // Поля точно нет: обычное приложение без фокуса вовсе; окно Electron, где поля
         // видны, но ни одно не в фокусе; приложение, которое обычно показывает поле.
-        if editability == .axUnreadable,
+        // Кроме окна, где страница ещё закрыта от служб доступности (Safari): там
+        // «не видно» ничего не значит.
+        if editability == .axUnreadable, !webContentHidden,
            (!hidesFields && noFocusAtAll) || windowHasFields || Self.showsFieldsReliably(bundleID: bundleID) {
             DebugLog.log("Paste: поля ввода нет (\(bundleID)) → только буфер")
             editability = .notEditable
         }
         // Обычное приложение, но фокус на чём-то непонятном (окно, веб-область, группа):
         // ⌘V пробуем, но текст оставляем и в буфере.
-        let uncertain = editability == .axUnreadable && (!hidesFields || focusMayHaveMoved)
+        let uncertain = editability == .axUnreadable && (!hidesFields || focusMayHaveMoved || webContentHidden)
         DebugLog.log("Paste: focus classification = \(editability)")
 
         if editability == .notEditable {
