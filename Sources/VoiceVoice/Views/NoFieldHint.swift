@@ -13,7 +13,7 @@ struct NoFieldHint: View {
                 Text(kept ? "Текст ещё и в буфере обмена" : "Поле ввода не найдено")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
-                Text(kept ? "Во время диктовки курсор мог уйти из поля. Если текст не вставился — поставь курсор и нажми ⌘V."
+                Text(kept ? "Проверить вставку не удалось. Если текста нет в поле — поставь курсор и нажми ⌘V."
                           : "Поставь курсор в нужное поле и нажми ⌘V — текст уже в буфере")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.8))

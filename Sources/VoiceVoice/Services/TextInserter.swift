@@ -138,13 +138,14 @@ final class TextInserter {
         var sawField = false
         var sawWebArea = false
         var sawFieldInWebArea = false
+        var truncated = false
         func attr(_ e: AXUIElement, _ a: String) -> CFTypeRef? {
             var v: CFTypeRef?
             return AXUIElementCopyAttributeValue(e, a as CFString, &v) == .success ? v : nil
         }
         func search(_ e: AXUIElement, depth: Int, inWebArea: Bool) -> AXUIElement? {
             visited += 1
-            if visited > 3000 || depth > 80 || Date() > deadline { return nil }
+            if visited > 3000 || depth > 80 || Date() > deadline { truncated = true; return nil }
             let role = attr(e, kAXRoleAttribute as String) as? String
             if let role, textRoles.contains(role) {
                 sawField = true
@@ -159,9 +160,11 @@ final class TextInserter {
             return nil
         }
         let found = search(win as! AXUIElement, depth: 0, inWebArea: false)
-        let webContentHidden = found == nil && sawWebArea && !sawFieldInWebArea
-        DebugLog.log("Paste: обход окна — \(visited) узлов, поле в фокусе: \(found != nil), поля в окне: \(sawField)\(webContentHidden ? ", страница закрыта" : "")")
-        return (found, sawField, webContentHidden)
+        // Обход оборван (большая страница: Ozon, Wildberries в Chrome) — до поля в фокусе
+        // могли не дойти, и «поля видны, фокуса нет» ничего не доказывает.
+        let webContentHidden = found == nil && !truncated && sawWebArea && !sawFieldInWebArea
+        DebugLog.log("Paste: обход окна — \(visited) узлов\(truncated ? " (оборван)" : ""), поле в фокусе: \(found != nil), поля в окне: \(sawField)\(webContentHidden ? ", страница закрыта" : "")")
+        return (found, sawField && !truncated, webContentHidden)
     }
 
     /// Надёжно ли приложение показывает своё поле ввода. Считаем по истории: если почти
@@ -353,18 +356,19 @@ final class TextInserter {
         if editability != .notEditable {
             Self.recordFocus(bundleID: bundleID, visible: editability == .editable)
         }
-        // Поля точно нет: обычное приложение без фокуса вовсе; окно Electron, где поля
-        // видны, но ни одно не в фокусе; приложение, которое обычно показывает поле.
-        // Кроме окна, где страница ещё закрыта от служб доступности (Safari): там
-        // «не видно» ничего не значит.
-        if editability == .axUnreadable, !webContentHidden,
-           (!hidesFields && noFocusAtAll) || windowHasFields || Self.showsFieldsReliably(bundleID: bundleID) {
-            DebugLog.log("Paste: поля ввода нет (\(bundleID)) → только буфер")
-            editability = .notEditable
-        }
+        // Поля, похоже, нет: обычное приложение без фокуса вовсе; окно, где поля видны,
+        // но ни одно не в фокусе; приложение, которое обычно показывает поле. Это только
+        // догадка по службам доступности — они ошибались и в Safari (страница открывается
+        // лениво), и в Chrome (поле чата глубже, чем успевает обход). Поэтому ⌘V всё
+        // равно отправляется, а текст остаётся и в буфере. «Только буфер» — лишь когда
+        // фокус точно не на поле (кнопка, список: `classifyFocus` → notEditable).
+        let probablyNoField = editability == .axUnreadable && !webContentHidden
+            && ((!hidesFields && noFocusAtAll) || windowHasFields || Self.showsFieldsReliably(bundleID: bundleID))
+        if probablyNoField { DebugLog.log("Paste: поле ввода не видно (\(bundleID)) → ⌘V + текст в буфере") }
         // Обычное приложение, но фокус на чём-то непонятном (окно, веб-область, группа):
         // ⌘V пробуем, но текст оставляем и в буфере.
-        let uncertain = editability == .axUnreadable && (!hidesFields || focusMayHaveMoved || webContentHidden)
+        let uncertain = editability == .axUnreadable
+            && (!hidesFields || focusMayHaveMoved || webContentHidden || probablyNoField)
         DebugLog.log("Paste: focus classification = \(editability)")
 
         if editability == .notEditable {
