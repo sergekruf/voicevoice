@@ -126,11 +126,13 @@ final class TextInserter {
     /// `webContentHidden` — в окне есть веб-страница, но полей в ней не видно: Safari
     /// (WebKit) строит дерево страницы лениво, после первого обращения, — поля окна вне
     /// страницы (адресная строка) тогда ничего не говорят о курсоре.
-    private static func findFocusedTextElement(pid: pid_t) -> (field: AXUIElement?, windowHasFields: Bool, webContentHidden: Bool) {
+    /// `pageHasFields` — поля видны внутри самой страницы (AXWebArea), а не только в рамке
+    /// окна: у Chrome, который страницу не показывает, видна лишь адресная строка.
+    private static func findFocusedTextElement(pid: pid_t) -> (field: AXUIElement?, windowHasFields: Bool, pageHasFields: Bool, webContentHidden: Bool) {
         let app = AXUIElementCreateApplication(pid)
         var winRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
-              let win = winRef else { return (nil, false, false) }
+              let win = winRef else { return (nil, false, false, false) }
         let textRoles: Set<String> = [kAXTextFieldRole as String, kAXTextAreaRole as String,
                                       kAXComboBoxRole as String, "AXSearchField"]
         let deadline = Date().addingTimeInterval(0.15)
@@ -164,7 +166,7 @@ final class TextInserter {
         // могли не дойти, и «поля видны, фокуса нет» ничего не доказывает.
         let webContentHidden = found == nil && !truncated && sawWebArea && !sawFieldInWebArea
         DebugLog.log("Paste: обход окна — \(visited) узлов\(truncated ? " (оборван)" : ""), поле в фокусе: \(found != nil), поля в окне: \(sawField)\(webContentHidden ? ", страница закрыта" : "")")
-        return (found, sawField && !truncated, webContentHidden)
+        return (found, sawField && !truncated, sawFieldInWebArea && !truncated, webContentHidden)
     }
 
     /// Надёжно ли приложение показывает своё поле ввода. Считаем по истории: если почти
@@ -346,7 +348,9 @@ final class TextInserter {
                 try? await Task.sleep(nanoseconds: 150_000_000)
                 found = Self.findFocusedTextElement(pid: pid)
             }
-            windowHasFields = found.windowHasFields
+            // Chromium/Electron/Qt: поля в рамке окна (адресная строка Chrome) о курсоре на
+            // странице ничего не говорят — считаются только поля самой страницы.
+            windowHasFields = hidesFields ? found.pageHasFields : found.windowHasFields
             webContentHidden = found.webContentHidden
             if let field = found.field {
                 focusedElement = field
