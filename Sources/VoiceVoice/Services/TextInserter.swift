@@ -438,6 +438,29 @@ final class TextInserter {
             return .pastedNoAutoLearn
         }
 
+        // Electron/Chromium/Qt: поле, которое видно службам доступности, бывает посредником —
+        // у Termius (xterm.js) это скрытое поле, всегда пустое: текст сразу уходит в
+        // терминал. Проверка «не видит» вставку, а повторный ⌘V вставлял текст второй и
+        // третий раз. Поэтому здесь ⌘V не повторяем: ещё раз смотрим поле (медленное
+        // приложение) и доверяем первому ⌘V, как в полях без проверки.
+        if hidesFields {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Self.pasteLanded(element: focusedElement, pastedText: text, preValue: preValue) {
+                DebugLog.log("Paste: tier1 verified via AX (поздно) — restoring previous clipboard")
+                await finalizeAfterPaste(savedClipboard: savedClipboard)
+                lastVerifiedField = focusedElement
+                return .pasted
+            }
+            if uncertain {
+                DebugLog.log("Paste: вставка не видна в поле (\(bundleID)), фокус мог уйти — повторный ⌘V не шлём, текст в буфере")
+                writePlainText(text)
+                return .pastedKeptInClipboard
+            }
+            DebugLog.log("Paste: вставка не видна в поле (\(bundleID)) — поле может быть посредником, повторный ⌘V не шлём")
+            await finalizeAfterPaste(savedClipboard: savedClipboard)
+            return .pastedNoAutoLearn
+        }
+
         // Tier 2: AppleScript via NSAppleScript.
         let aplOk = await runAppleScriptKeystrokeV()
         DebugLog.log("Paste tier2 (NSAppleScript): ok=\(aplOk)")
