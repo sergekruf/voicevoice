@@ -383,6 +383,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(nanoseconds: 800_000_000)
                 let clip = NSPasteboard.general.string(forType: .string) ?? "(пусто)"
                 print("PASTE-TEST front=\(front) outcome=\(outcome) clipboard=\(clip == text ? "НАШ ТЕКСТ" : "прежнее: " + String(clip.prefix(40)))")
+                // Вставку не проверить — текст лежит в буфере 15 с, потом возвращается прежнее.
+                if outcome == .pastedNoAutoLearn {
+                    try? await Task.sleep(nanoseconds: 16_000_000_000)
+                    let later = NSPasteboard.general.string(forType: .string) ?? "(пусто)"
+                    print("PASTE-TEST через 16 с clipboard=\(later == text ? "НАШ ТЕКСТ" : "прежнее: " + String(later.prefix(40)))")
+                }
                 exit(0)
             }
             return

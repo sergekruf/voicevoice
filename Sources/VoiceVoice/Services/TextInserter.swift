@@ -83,6 +83,43 @@ final class TextInserter {
         await restoreClipboard(savedClipboard)
     }
 
+    // MARK: - Отложенный возврат буфера (вставку не проверить)
+
+    /// Bitrix24, Chrome, MAX не показывают поле ввода, а буфер при ⌘V Chromium читает и без
+    /// курсора в поле (проверено ленивым провайдером) — узнать, долетел ли текст, нечем.
+    /// Поэтому после такой вставки текст ещё `unverifiedKeepSeconds` лежит в буфере: не
+    /// вставилось — курсор в поле и ⌘V. Потом возвращается прежнее содержимое — если
+    /// буфер за это время не трогали. Запись временная: менеджеры буфера её не берут.
+    private static let unverifiedKeepSeconds: TimeInterval = 15
+    @MainActor private var pendingRestore: (snapshot: ClipboardSnapshot, text: String, task: Task<Void, Never>)?
+
+    @MainActor
+    private func scheduleDeferredRestore(_ snapshot: ClipboardSnapshot, text: String) {
+        pendingRestore?.task.cancel()
+        let task = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.unverifiedKeepSeconds * 1_000_000_000))
+            guard !Task.isCancelled, let self, let pending = self.pendingRestore, pending.text == text else { return }
+            self.pendingRestore = nil
+            guard NSPasteboard.general.string(forType: .string) == text else {
+                DebugLog.log("Clipboard: буфер изменён за \(Int(Self.unverifiedKeepSeconds)) с — прежнее содержимое не возвращаем")
+                return
+            }
+            snapshot.restore()
+            DebugLog.log("Clipboard: отложенный возврат прежнего содержимого (\(Int(Self.unverifiedKeepSeconds)) с прошло)")
+        }
+        pendingRestore = (snapshot, text, task)
+    }
+
+    /// Новая вставка раньше срока: отложенный возврат снимается. Если в буфере всё ещё
+    /// текст прошлой диктовки, прежнее содержимое переходит к новой вставке.
+    @MainActor
+    private func takePendingRestore() -> ClipboardSnapshot? {
+        guard let pending = pendingRestore else { return nil }
+        pending.task.cancel()
+        pendingRestore = nil
+        return NSPasteboard.general.string(forType: .string) == pending.text ? pending.snapshot : nil
+    }
+
     /// Asynchronous paste. Returns the outcome so the caller can update its UI state
     /// (typically `AppController.lastPasteOutcome` → reflected in the unified ResultHUD).
     /// - focusMayHaveMoved: во время диктовки был клик мышью или смена приложения —
@@ -360,6 +397,7 @@ final class TextInserter {
             && (!hidesFields || focusMayHaveMoved || webContentHidden || probablyNoField)
         DebugLog.log("Paste: focus classification = \(editability)")
 
+        let carriedClipboard = await takePendingRestore()
         if editability == .notEditable {
             writePlainText(text)
             recordOurClipboardWrite(text)
@@ -373,7 +411,10 @@ final class TextInserter {
         // our own previously-pasted text back into the clipboard.
         let currentClipboard = NSPasteboard.general.string(forType: .string)
         let savedClipboard: ClipboardSnapshot
-        if isOursLeftover(currentClipboard) {
+        if let carriedClipboard {
+            DebugLog.log("Clipboard: в буфере текст прошлой диктовки — прежнее содержимое переходит к этой вставке")
+            savedClipboard = carriedClipboard
+        } else if isOursLeftover(currentClipboard) {
             DebugLog.log("Clipboard: current content is our leftover — will clear after paste")
             savedClipboard = .empty
         } else {
@@ -405,11 +446,10 @@ final class TextInserter {
             // Edit & Learn button — auto-learn watcher physically can't track edits in
             // these apps, and this is the only way for the user to teach the dictionary.
             //
-            // Clipboard: восстанавливаем прежнее содержимое сразу, как и для
-            // проверяемых полей — иначе привычный ⌘V после диктовки вставлял
-            // текст ВТОРОЙ раз (жалоба пользователя). Если вставка вдруг не
-            // долетела (редкий случай в этом классе приложений) — в HUD есть
-            // кнопка «Копировать».
+            // Clipboard: прежнее содержимое возвращается не сразу, а через
+            // `unverifiedKeepSeconds` — курсор мог быть не в поле (Bitrix24), и текст
+            // пропадал. Насовсем в буфере не оставляем: привычный ⌘V после диктовки
+            // вставлял текст ВТОРОЙ раз (жалоба пользователя).
             if uncertain {
                 // Курсор мог уйти из поля (клик или смена приложения во время диктовки)
                 // или фокус в обычном приложении на непонятном элементе — проверить
@@ -418,8 +458,8 @@ final class TextInserter {
                 writePlainText(text)
                 return .pastedKeptInClipboard
             }
-            DebugLog.log("Paste: AX unverifiable — trusting tier1; restoring clipboard (HUD with Edit & Learn)")
-            await finalizeAfterPaste(savedClipboard: savedClipboard)
+            DebugLog.log("Paste: AX unverifiable — trusting tier1; текст в буфере ещё \(Int(Self.unverifiedKeepSeconds)) с")
+            await scheduleDeferredRestore(savedClipboard, text: text)
             return .pastedNoAutoLearn
         }
 
@@ -441,8 +481,8 @@ final class TextInserter {
                 writePlainText(text)
                 return .pastedKeptInClipboard
             }
-            DebugLog.log("Paste: вставка не видна в поле (\(bundleID)) — поле может быть посредником, повторный ⌘V не шлём")
-            await finalizeAfterPaste(savedClipboard: savedClipboard)
+            DebugLog.log("Paste: вставка не видна в поле (\(bundleID)) — поле может быть посредником, повторный ⌘V не шлём; текст в буфере ещё \(Int(Self.unverifiedKeepSeconds)) с")
+            await scheduleDeferredRestore(savedClipboard, text: text)
             return .pastedNoAutoLearn
         }
 
