@@ -188,7 +188,7 @@ final class AppSettings: ObservableObject {
         "modelName", "language", "punctuationModel", "sageCorrector", "llmEditor",
         "llmIdleUnloadMinutes", "fixPunctuation", "eagerTranscription", "eagerLoad",
         "autoEmoji", "autoFormat", "keepClipboard", "alwaysKeepInClipboard", "punctuationPrompt",
-        "gigaamBeamSize", "gigaamHotwords",
+        "gigaamBeamSize", "gigaamHotwords", "axFocusStats",
     ]
 
     private init() {

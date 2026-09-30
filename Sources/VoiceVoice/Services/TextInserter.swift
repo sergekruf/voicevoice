@@ -131,8 +131,15 @@ final class TextInserter {
     private static func findFocusedTextElement(pid: pid_t) -> (field: AXUIElement?, windowHasFields: Bool, pageHasFields: Bool, webContentHidden: Bool) {
         let app = AXUIElementCreateApplication(pid)
         var winRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
-              let win = winRef else { return (nil, false, false, false) }
+        // Electron-приложение (Claude) иногда не отдаёт окно в фокусе — берём главное.
+        if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &winRef) != .success {
+            winRef = nil
+            _ = AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &winRef)
+        }
+        guard let win = winRef else {
+            DebugLog.log("Paste: окно приложения недоступно службам доступности — обход не сделан")
+            return (nil, false, false, false)
+        }
         let textRoles: Set<String> = [kAXTextFieldRole as String, kAXTextAreaRole as String,
                                       kAXComboBoxRole as String, "AXSearchField"]
         let deadline = Date().addingTimeInterval(0.15)
@@ -169,12 +176,6 @@ final class TextInserter {
         return (found, sawField && !truncated, sawFieldInWebArea && !truncated, webContentHidden)
     }
 
-    /// Надёжно ли приложение показывает своё поле ввода. Считаем по истории: если почти
-    /// всегда (≥90%, минимум 5 раз) поле было видно, то «фокуса нет» в нём означает, что
-    /// курсор действительно не в поле. У Qt/браузеров (MAX, Яндекс) поле видно редко —
-    /// там «не видно» ничего не значит, и мы по-прежнему вставляем вслепую.
-    private static let focusStatsKey = "axFocusStats"
-
     /// Приложения на Electron, Chromium (Chrome, Яндекс, ChatGPT, Bitrix24) и Qt (MAX)
     /// прячут поле ввода от служб доступности — «фокуса нет» в них ничего не значит.
     /// Обычные приложения macOS показывают поле всегда. Узнаём по составу пакета.
@@ -193,20 +194,6 @@ final class TextInserter {
         hidesFieldsCache[key] = hides
         DebugLog.log("Paste: \(key) — \(hides ? "Electron/Chromium/Qt, поле может быть скрыто" : "обычное приложение macOS")")
         return hides
-    }
-
-    private static func recordFocus(bundleID: String, visible: Bool) {
-        var stats = UserDefaults.standard.dictionary(forKey: focusStatsKey) as? [String: [Int]] ?? [:]
-        var s = stats[bundleID] ?? [0, 0]
-        if visible { s[0] += 1 } else { s[1] += 1 }
-        stats[bundleID] = s
-        UserDefaults.standard.set(stats, forKey: focusStatsKey)
-    }
-
-    private static func showsFieldsReliably(bundleID: String) -> Bool {
-        let stats = UserDefaults.standard.dictionary(forKey: focusStatsKey) as? [String: [Int]] ?? [:]
-        guard let s = stats[bundleID] else { return false }
-        return s[0] >= 5 && Double(s[0]) >= 0.9 * Double(s[0] + s[1])
     }
 
     func copyOnly(_ text: String) {
@@ -357,17 +344,15 @@ final class TextInserter {
                 editability = .editable
             }
         }
-        if editability != .notEditable {
-            Self.recordFocus(bundleID: bundleID, visible: editability == .editable)
-        }
         // Поля, похоже, нет: обычное приложение без фокуса вовсе; окно, где поля видны,
-        // но ни одно не в фокусе; приложение, которое обычно показывает поле. Это только
+        // но ни одно не в фокусе. (Статистика «приложение обычно показывает поле» убрана:
+        // когда окно Claude недоступно, она выдавала «поля нет» при курсоре в поле.) Это только
         // догадка по службам доступности — они ошибались и в Safari (страница открывается
         // лениво), и в Chrome (поле чата глубже, чем успевает обход). Поэтому ⌘V всё
         // равно отправляется, а текст остаётся и в буфере. «Только буфер» — лишь когда
         // фокус точно не на поле (кнопка, список: `classifyFocus` → notEditable).
         let probablyNoField = editability == .axUnreadable && !webContentHidden
-            && ((!hidesFields && noFocusAtAll) || windowHasFields || Self.showsFieldsReliably(bundleID: bundleID))
+            && ((!hidesFields && noFocusAtAll) || windowHasFields)
         if probablyNoField { DebugLog.log("Paste: поле ввода не видно (\(bundleID)) → ⌘V + текст в буфере") }
         // Обычное приложение, но фокус на чём-то непонятном (окно, веб-область, группа):
         // ⌘V пробуем, но текст оставляем и в буфере.
