@@ -4,12 +4,14 @@
 
 ## [Unreleased]
 
+### Запланировано
+- GitHub Actions для авто-сборки `.app` и `.dmg` по тегу `v*`.
+
+## [1.1.13] — 2026-09-30
+
 ### Исправлено
 - **Claude: текст больше не остаётся в буфере после успешной вставки.** Когда Claude не отдавал своё окно службам доступности, VoiceVoice решал «поля нет» по статистике («в этом приложении поле обычно видно, а сейчас нет») — ⌘V срабатывал, но продиктованный текст оставался в буфере вместо прежнего. Статистическая догадка убрана; если окно в фокусе недоступно, проверяется главное окно приложения.
 - **Termius: текст вставлялся три раза.** С 1.1.9 VoiceVoice видит поле ввода в Electron-приложениях, но у Termius это скрытое служебное поле терминала — оно всегда пустое, текст сразу уходит в терминал. Проверка не находила вставленный текст и повторяла ⌘V запасными способами. Теперь в приложениях на Electron, Chromium и Qt повторный ⌘V не отправляется: если вставка не видна, VoiceVoice доверяет первому ⌘V.
-
-### Запланировано
-- GitHub Actions для авто-сборки `.app` и `.dmg` по тегу `v*`.
 
 ## [1.1.12] — 2026-09-28
 
@@ -282,7 +284,8 @@
 - WhisperKit + CoreML/ANE
 - GRDB (SQLite-обёртка)
 
-[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.1.12...HEAD
+[Unreleased]: https://github.com/sergekruf/voicevoice/compare/v1.1.13...HEAD
+[1.1.13]: https://github.com/sergekruf/voicevoice/compare/v1.1.12...v1.1.13
 [1.1.12]: https://github.com/sergekruf/voicevoice/compare/v1.1.11...v1.1.12
 [1.1.11]: https://github.com/sergekruf/voicevoice/compare/v1.1.10...v1.1.11
 [1.1.10]: https://github.com/sergekruf/voicevoice/compare/v1.1.9...v1.1.10
